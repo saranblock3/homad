@@ -205,6 +205,7 @@ impl Homa {
         rx: Receiver<HomaMessage>,
     ) {
         for homa_message in rx {
+            println!("||||||||||||||| {:?}", homa_message.source_address);
             let homa_message_bytes = serialize(&homa_message).unwrap();
             let mut size = (homa_message_bytes.len() as u64).to_le_bytes().to_vec();
             size.append(&mut homa_message_bytes.to_vec());
