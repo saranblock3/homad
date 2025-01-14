@@ -60,7 +60,7 @@ impl HomaDatagram {
     pub fn grant(&self, priority: u8) -> Self {
         let mut grant = self.clone();
         grant.datagram_type = HomaDatagramType::Grant;
-        grant.sequence_number += self.payload.len() as u64;
+        grant.sequence_number += 1;
         grant.swap_endpoints();
         grant.priority_control = priority;
         grant.payload = Vec::new();

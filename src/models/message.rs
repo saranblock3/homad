@@ -45,11 +45,15 @@ impl HomaMessage {
 
     pub fn split(&self) -> Vec<HomaDatagram> {
         let mut datagrams = Vec::<HomaDatagram>::new();
-        for i in (0..self.content.len()).step_by(HOMA_DATAGRAM_PAYLOAD_LENGTH as usize) {
+        let num_datagrams = (self.content.len() + (HOMA_DATAGRAM_PAYLOAD_LENGTH as usize) - 1)
+            / HOMA_DATAGRAM_PAYLOAD_LENGTH as usize;
+        for i in 0..num_datagrams {
             let datagram_length = min(
-                self.content.len() - i,
+                self.content.len() - i * HOMA_DATAGRAM_PAYLOAD_LENGTH as usize,
                 HOMA_DATAGRAM_PAYLOAD_LENGTH as usize,
             );
+            let start = i * HOMA_DATAGRAM_PAYLOAD_LENGTH as usize;
+            let end = start + datagram_length;
             let datagram = HomaDatagramBuilder::default()
                 .datagram_type(HomaDatagramType::Data)
                 .message_id(self.id)
@@ -60,7 +64,7 @@ impl HomaMessage {
                 .sequence_number(i as u64)
                 .message_length(self.content.len() as u64)
                 .datagram_length(datagram_length as u16)
-                .payload(self.content[i..i + datagram_length].to_vec())
+                .payload(self.content[start..end].to_vec())
                 .build()
                 .unwrap();
             datagrams.push(datagram);
