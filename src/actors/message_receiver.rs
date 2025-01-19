@@ -6,7 +6,10 @@ use crate::{
         message::{HomaMessage, HomaMessageBuilder},
     },
 };
-use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::{
+    sync::mpsc::{channel, Receiver, Sender},
+    task::JoinHandle,
+};
 
 struct MessageReceiver {
     datagram_sender_handle: DatagramSenderHandle,
@@ -14,6 +17,7 @@ struct MessageReceiver {
     rx: Receiver<HomaDatagram>,
 
     message_id: u64,
+    datagram: HomaDatagram,
     source_address: [u8; 4],
     destination_address: [u8; 4],
     source_id: u32,
@@ -56,16 +60,24 @@ impl MessageReceiver {
 }
 
 async fn run_message_receiver(mut message_receiver: MessageReceiver) {
-    use crate::actors::application::ApplicationMessage::ToApplicationWriter;
+    use crate::actors::application::ApplicationMessage::FromMessageReceiver;
     println!("Started message receiver");
     if message_receiver.check_message() {
+        let grant = message_receiver.datagram.grant(0).to_ipv4(0);
+        message_receiver
+            .datagram_sender_handle
+            .tx
+            .send(grant)
+            .await
+            .unwrap();
         let homa_message = message_receiver.build_message();
         message_receiver
             .application_handle
             .tx
-            .send(ToApplicationWriter(homa_message))
+            .send(FromMessageReceiver(homa_message))
             .await
             .unwrap();
+        println!("End of message receiver");
         return;
     }
     while let Some(datagram) = message_receiver.rx.recv().await {
@@ -79,6 +91,7 @@ async fn run_message_receiver(mut message_receiver: MessageReceiver) {
             .send(grant)
             .await
             .unwrap();
+        println!("Sent grant");
         if message_receiver.check_message() {
             break;
         }
@@ -87,9 +100,10 @@ async fn run_message_receiver(mut message_receiver: MessageReceiver) {
     message_receiver
         .application_handle
         .tx
-        .send(ToApplicationWriter(homa_message))
+        .send(FromMessageReceiver(homa_message))
         .await
         .unwrap();
+    println!("End of message receiver")
 }
 
 #[derive(Clone)]
@@ -102,7 +116,7 @@ impl MessageReceiverHandle {
         datagram: HomaDatagram,
         datagram_sender_handle: DatagramSenderHandle,
         application_handle: ApplicationHandle,
-    ) -> Self {
+    ) -> (Self, JoinHandle<()>) {
         println!("{:?}", datagram);
         let (tx, rx) = channel(100);
         let message_receiver_actor = MessageReceiver {
@@ -111,6 +125,7 @@ impl MessageReceiverHandle {
             rx,
 
             message_id: datagram.message_id,
+            datagram: datagram.clone(),
             source_address: datagram.source_address,
             destination_address: datagram.destination_address,
             source_id: datagram.source_id,
@@ -119,7 +134,7 @@ impl MessageReceiverHandle {
             collected: datagram.payload.len() as u64,
             content: datagram.payload,
         };
-        tokio::spawn(run_message_receiver(message_receiver_actor));
-        Self { tx }
+        let join_handle = tokio::spawn(run_message_receiver(message_receiver_actor));
+        (Self { tx }, join_handle)
     }
 }

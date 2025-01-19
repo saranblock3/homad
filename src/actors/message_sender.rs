@@ -1,12 +1,16 @@
+use super::application::ApplicationHandle;
 use super::datagram_sender::DatagramSenderHandle;
+use crate::models::datagram::HomaDatagramType::Grant;
 use crate::models::{datagram::HomaDatagram, message::HomaMessage};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::task::JoinHandle;
 
 struct MessageSender {
     rx: Receiver<HomaDatagram>,
     message: HomaMessage,
     datagrams: Vec<HomaDatagram>,
     datagram_sender_handle: DatagramSenderHandle,
+    application_handle: ApplicationHandle,
 }
 
 impl MessageSender {
@@ -48,11 +52,26 @@ impl MessageSender {
 }
 
 async fn run_message_sender(mut message_sender: MessageSender) {
+    use crate::actors::application::ApplicationMessage::*;
     message_sender.send_rtt_bytes().await;
     println!("Sent rtt bytes");
     while let Some(datagram) = message_sender.rx.recv().await {
+        if let Grant = datagram.datagram_type {
+            println!("Received grant: {}", datagram.sequence_number);
+            if datagram.sequence_number == message_sender.datagrams.len() as u64 {
+                println!("Received last grant");
+                break;
+            }
+        }
         message_sender.handle_datagram(datagram).await;
     }
+    message_sender
+        .application_handle
+        .tx
+        .send(FromMessageSender(message_sender.message.id))
+        .await
+        .unwrap();
+    println!("End of message sender")
 }
 
 #[derive(Clone)]
@@ -61,7 +80,11 @@ pub struct MessageSenderHandle {
 }
 
 impl MessageSenderHandle {
-    pub fn new(message: HomaMessage, datagram_sender_handle: DatagramSenderHandle) -> Self {
+    pub fn new(
+        message: HomaMessage,
+        datagram_sender_handle: DatagramSenderHandle,
+        application_handle: ApplicationHandle,
+    ) -> (Self, JoinHandle<()>) {
         let (tx, rx) = channel::<HomaDatagram>(100);
         let datagrams = message.split();
         let message_sender = MessageSender {
@@ -69,8 +92,9 @@ impl MessageSenderHandle {
             message,
             datagrams,
             datagram_sender_handle,
+            application_handle,
         };
-        tokio::spawn(run_message_sender(message_sender));
-        Self { tx }
+        let join_handle = tokio::spawn(run_message_sender(message_sender));
+        (Self { tx }, join_handle)
     }
 }

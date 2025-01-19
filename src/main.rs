@@ -4,9 +4,12 @@ mod homa;
 mod models;
 mod utils;
 
+use crate::actors::application_listener::ApplicationListener;
+use crate::actors::application_registrar::ApplicationRegistrarHandle;
 use actors::{
     application::ApplicationHandle, application_registrar::ApplicationRegistrar,
     datagram_receiver::DatagramReceiver, datagram_sender::DatagramSenderHandle,
+    priority_manager::PriorityManagerHandle,
 };
 use pnet::packet::ip::IpNextHeaderProtocol;
 use pnet::transport::transport_channel;
@@ -27,7 +30,10 @@ async fn start_homa() -> Result<(), io::Error> {
     let applications = Arc::new(Mutex::new(HashMap::<u32, ApplicationHandle>::new()));
 
     let applications_clone = Arc::clone(&applications);
-    ApplicationRegistrar::start(applications_clone, datagram_sender_handle);
+    let application_registrar_handle =
+        ApplicationRegistrarHandle::new(applications_clone, datagram_sender_handle);
+
+    ApplicationListener::start(application_registrar_handle);
 
     let applications_clone = Arc::clone(&applications);
     DatagramReceiver::start(transport_receiver, applications_clone);
