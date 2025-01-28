@@ -1,3 +1,5 @@
+use super::priority_manager::PriorityManagerHandle;
+use super::workload_manager::WorkloadManagerHandle;
 use super::{
     application_writer::ApplicationWriterHandle, datagram_sender::DatagramSenderHandle,
     message_receiver::MessageReceiverHandle, message_sender::MessageSenderHandle,
@@ -18,6 +20,8 @@ struct Application {
     message_receivers: HashMap<u64, (MessageReceiverHandle, JoinHandle<()>)>,
     message_senders: HashMap<u64, (MessageSenderHandle, JoinHandle<()>)>,
     application_registrar_handle: ApplicationRegistrarHandle,
+    priority_manager_handle: PriorityManagerHandle,
+    workload_manager_handle: WorkloadManagerHandle,
     datagram_sender_handle: DatagramSenderHandle,
 }
 
@@ -27,11 +31,12 @@ impl Application {
         use ApplicationMessage::*;
         match application_message {
             Shutdown => {
+                println!("APPLICATION (ID: {}) SHUTDOWN", self.id);
                 self.application_registrar_handle
                     .tx
                     .send(FromApplication(self.id))
                     .await
-                    .unwrap();
+                    .expect("application -> application_registrar failed");
                 self.rx.close()
             }
             FromDatagramReceiver(datagram) => self.handle_from_datagram_receiver(datagram).await,
@@ -47,6 +52,10 @@ impl Application {
 
     async fn handle_from_datagram_receiver(&mut self, datagram: HomaDatagram) {
         use crate::models::datagram::HomaDatagramType::*;
+        println!(
+            "APPLICATION (ID: {}) RECEIVED DATAGRAM FROM (ID: {}) WITH MESSAGE ID {}",
+            self.id, datagram.source_id, datagram.message_id,
+        );
         match datagram.datagram_type {
             Data => self.handle_data_datagram(datagram).await,
             _ => self.handle_control_datagram(datagram).await,
@@ -58,15 +67,21 @@ impl Application {
         if let Some((message_receiver_handle, _)) = self.message_receivers.get(&datagram.message_id)
         {
             println!(
-                "{} -> {}\n{:?}",
-                datagram.source_id, datagram.destination_id, datagram
+                "APPLICATION (ID: {}) TO MESSAGE RECEIVER (ID: {}) FROM (ID: {}) WITH SEQUENCE NUMBER {}",
+                self.id, datagram.message_id, datagram.source_id, datagram.sequence_number
             );
-            message_receiver_handle.tx.send(datagram).await.unwrap();
-            println!("Sent to message receiver {}", message_id);
+            message_receiver_handle.tx.send(datagram).await;
+            // .expect("application -> message_receiver failed");
         } else {
+            println!(
+                "APPLICATION (ID: {}) CREATE MESSAGE RECEIVER (ID: {}) FROM (ID: {})",
+                self.id, datagram.message_id, datagram.source_id
+            );
             let message_receiver_handle = MessageReceiverHandle::new(
                 datagram,
                 self.datagram_sender_handle.clone(),
+                self.priority_manager_handle.clone(),
+                self.workload_manager_handle.clone(),
                 self.application_handle.clone(),
             );
             self.message_receivers
@@ -75,21 +90,23 @@ impl Application {
     }
 
     async fn handle_control_datagram(&mut self, datagram: HomaDatagram) {
-        if let Some((message_receiver_handle, _)) = self.message_senders.get(&datagram.message_id) {
-            println!(
-                "{} -> {}\n{:?}",
-                datagram.source_id, datagram.destination_id, datagram
-            );
-            message_receiver_handle.tx.send(datagram).await.unwrap();
+        if let Some((message_sender_handle, _)) = self.message_senders.get(&datagram.message_id) {
+            message_sender_handle.tx.send(datagram).await;
+            // .expect("application -> message_sender failed");
         }
     }
 
     fn handle_from_application_reader(&mut self, message: HomaMessage) {
         let message_id = message.id;
+        println!(
+            "APPLICATION (ID: {}) CREATE MESSAGE SENDER (ID: {})",
+            self.id, message.id
+        );
         let message_sender_handle = MessageSenderHandle::new(
             message,
-            self.datagram_sender_handle.clone(),
             self.application_handle.clone(),
+            self.priority_manager_handle.clone(),
+            self.datagram_sender_handle.clone(),
         );
         self.message_senders
             .insert(message_id, message_sender_handle);
@@ -121,9 +138,7 @@ pub enum ApplicationMessage {
 }
 
 async fn run_application(mut application: Application) {
-    println!("Started application");
     while let Some(application_message) = application.rx.recv().await {
-        println!("Received appliccation message");
         application
             .handle_application_message(application_message)
             .await;
@@ -140,9 +155,11 @@ impl ApplicationHandle {
         id: u32,
         application_writer_handle: ApplicationWriterHandle,
         application_registrar_handle: ApplicationRegistrarHandle,
+        priority_manager_handle: PriorityManagerHandle,
+        workload_manager_handle: WorkloadManagerHandle,
         datagram_sender_handle: DatagramSenderHandle,
     ) -> Self {
-        let (tx, rx) = channel::<ApplicationMessage>(100);
+        let (tx, rx) = channel::<ApplicationMessage>(1000);
         let application_handle = Self { tx };
         let application = Application {
             id,
@@ -152,6 +169,8 @@ impl ApplicationHandle {
             message_receivers: HashMap::new(),
             message_senders: HashMap::new(),
             application_registrar_handle,
+            priority_manager_handle,
+            workload_manager_handle,
             datagram_sender_handle,
         };
         tokio::spawn(run_application(application));

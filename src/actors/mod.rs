@@ -8,3 +8,4 @@ pub mod datagram_sender;
 pub mod message_receiver;
 pub mod message_sender;
 pub mod priority_manager;
+pub mod workload_manager;

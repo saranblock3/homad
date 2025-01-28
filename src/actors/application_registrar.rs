@@ -1,4 +1,5 @@
 use super::priority_manager::PriorityManagerHandle;
+use super::workload_manager::WorkloadManagerHandle;
 use super::{
     application::ApplicationHandle, application_reader::ApplicationReader,
     datagram_sender::DatagramSenderHandle,
@@ -20,13 +21,14 @@ pub struct ApplicationRegistrar {
     applications: Arc<Mutex<HashMap<u32, ApplicationHandle>>>,
     rx: Receiver<ApplicationRegistrarMessage>,
     application_registrar_handle: ApplicationRegistrarHandle,
+    priority_manager_handle: PriorityManagerHandle,
+    workload_manager_handle: WorkloadManagerHandle,
     datagram_sender_handle: DatagramSenderHandle,
 }
 
 impl ApplicationRegistrar {
     fn handle_from_application_listener(&mut self, mut stream: UnixStream) {
         if let Ok(registration_message) = HomaRegistrationMessage::from_unix_stream(&mut stream) {
-            println!("{:?}", registration_message);
             let read_stream = if let Ok(read_stream) = stream.try_clone() {
                 read_stream
             } else {
@@ -45,6 +47,8 @@ impl ApplicationRegistrar {
                     id,
                     application_writer_handle,
                     self.application_registrar_handle.clone(),
+                    self.priority_manager_handle.clone(),
+                    self.workload_manager_handle.clone(),
                     self.datagram_sender_handle.clone(),
                 );
                 applications.insert(id, application_handle.clone());
@@ -85,14 +89,18 @@ pub struct ApplicationRegistrarHandle {
 impl ApplicationRegistrarHandle {
     pub fn new(
         applications: Arc<Mutex<HashMap<u32, ApplicationHandle>>>,
+        priority_manager_handle: PriorityManagerHandle,
+        workload_manager_handle: WorkloadManagerHandle,
         datagram_sender_handle: DatagramSenderHandle,
     ) -> Self {
-        let (tx, rx) = channel::<ApplicationRegistrarMessage>(100);
+        let (tx, rx) = channel::<ApplicationRegistrarMessage>(1000);
         let application_registrar_handle = Self { tx };
         let application_registrar = ApplicationRegistrar {
             applications,
             rx,
             application_registrar_handle: application_registrar_handle.clone(),
+            priority_manager_handle,
+            workload_manager_handle,
             datagram_sender_handle,
         };
         tokio::task::spawn_blocking(move || run_application_registrar(application_registrar));

@@ -28,7 +28,6 @@ impl HomaMessage {
         let mut size_buffer = [0u8; 8];
 
         if let Err(_) = stream.read_exact(&mut size_buffer) {
-            println!("stream not read");
             return None;
         }
 

@@ -19,6 +19,10 @@ impl DatagramReceiver {
     fn handle_packet_payload(&self, packet_bytes: &[u8]) {
         use super::application::ApplicationMessage::FromDatagramReceiver;
         if let Ok(datagram) = deserialize::<HomaDatagram>(&packet_bytes) {
+            println!(
+                "DATAGRAM RECEIVER RECEIVED DATAGRAM FROM (ID: {}) TO (ID: {}) WITH MESSAGE ID (ID: {})",
+                datagram.source_id, datagram.destination_id, datagram.message_id
+            );
             let applications = self.applications.lock().unwrap();
             if let Some(application_handle) = applications.get(&datagram.destination_id) {
                 application_handle

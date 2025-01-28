@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::sync::oneshot;
 
 struct PriorityManager {
     receiver_priorities: HashMap<[u8; 4], u8>,
@@ -18,9 +19,9 @@ impl PriorityManager {
             }
             Get { address, tx } => {
                 if let Some(priority) = self.receiver_priorities.get(&address) {
-                    tx.blocking_send(Some(*priority)).unwrap();
+                    tx.send(Some(*priority)).unwrap();
                 } else {
-                    tx.blocking_send(None).unwrap();
+                    tx.send(None).unwrap();
                 }
             }
         }
@@ -40,7 +41,7 @@ pub enum PriorityManagerMessage {
     },
     Get {
         address: [u8; 4],
-        tx: Sender<Option<u8>>,
+        tx: oneshot::Sender<Option<u8>>,
     },
 }
 
@@ -60,5 +61,19 @@ impl PriorityManagerHandle {
             run_priority_manager(priority_manager);
         });
         Self { tx }
+    }
+
+    pub async fn put_priority(&self, address: [u8; 4], priority: u8) {
+        use PriorityManagerMessage::*;
+        let priority_manager_message = Put { address, priority };
+        self.tx.send(priority_manager_message).await.unwrap();
+    }
+
+    pub async fn get_priority(&self, address: [u8; 4]) -> Option<u8> {
+        use PriorityManagerMessage::*;
+        let (tx, rx) = oneshot::channel();
+        let priority_manager_message = Get { address, tx };
+        self.tx.send(priority_manager_message).await.unwrap();
+        rx.await.unwrap()
     }
 }

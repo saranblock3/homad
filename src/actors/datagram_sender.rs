@@ -30,7 +30,7 @@ pub struct DatagramSenderHandle {
 
 impl DatagramSenderHandle {
     pub fn new(transport_sender: TransportSender) -> Self {
-        let (tx, rx) = channel::<Vec<u8>>(1000);
+        let (tx, rx) = channel::<Vec<u8>>(10000);
         let actor = DatagramSender {
             transport_sender,
             rx,

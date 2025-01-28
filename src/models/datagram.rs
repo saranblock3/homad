@@ -31,8 +31,8 @@ pub struct HomaDatagram {
     pub source_id: u32,
     pub destination_id: u32,
     pub sequence_number: u64,
-    pub flags: u8,
-    pub priority_control: u8,
+    pub workload: u8,
+    pub priority: u8,
     pub message_length: u64,
     pub datagram_length: u16,
     pub payload: Vec<u8>,
@@ -62,7 +62,7 @@ impl HomaDatagram {
         grant.datagram_type = HomaDatagramType::Grant;
         grant.sequence_number += 1;
         grant.swap_endpoints();
-        grant.priority_control = priority;
+        grant.priority = priority;
         grant.payload = Vec::new();
         grant
     }

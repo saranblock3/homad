@@ -1,16 +1,21 @@
 use super::application::ApplicationHandle;
 use super::datagram_sender::DatagramSenderHandle;
+use super::priority_manager::PriorityManagerHandle;
+use crate::constants::UNSCHEDULED_HOMA_DATAGRAM_LIMIT;
 use crate::models::datagram::HomaDatagramType::Grant;
 use crate::models::{datagram::HomaDatagram, message::HomaMessage};
+use tokio::select;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::task::JoinHandle;
+use tokio::time::{sleep, Duration};
 
 struct MessageSender {
     rx: Receiver<HomaDatagram>,
     message: HomaMessage,
     datagrams: Vec<HomaDatagram>,
-    datagram_sender_handle: DatagramSenderHandle,
     application_handle: ApplicationHandle,
+    priority_manager_handle: PriorityManagerHandle,
+    datagram_sender_handle: DatagramSenderHandle,
 }
 
 impl MessageSender {
@@ -25,7 +30,7 @@ impl MessageSender {
 
     async fn handle_grant(&self, grant_datagram: HomaDatagram) {
         if let Some(next_datagram) = self.datagrams.get(grant_datagram.sequence_number as usize) {
-            let packet = next_datagram.to_ipv4(next_datagram.priority_control);
+            let packet = next_datagram.to_ipv4(next_datagram.priority);
             self.datagram_sender_handle
                 .tx
                 .send(packet)
@@ -34,10 +39,28 @@ impl MessageSender {
         }
     }
 
-    async fn send_rtt_bytes(&self) {
-        for i in 0..2 {
+    async fn handle_resend(&self, resend_datagram: HomaDatagram) {
+        if let Some(next_datagram) = self.datagrams.get(resend_datagram.sequence_number as usize) {
+            let packet = next_datagram.to_ipv4(resend_datagram.priority);
+            self.datagram_sender_handle
+                .tx
+                .send(packet)
+                .await
+                .expect("MessageSender -> DatagramSender failed");
+        }
+    }
+
+    fn check_message(&self, datagram: &HomaDatagram) -> bool {
+        if datagram.sequence_number == self.datagrams.len() as u64 {
+            return true;
+        }
+        false
+    }
+
+    async fn send_datagram_slice(&mut self, start: usize, end: usize) {
+        for i in start..end {
             if let Some(datagram) = self.datagrams.get(i) {
-                let packet = datagram.to_ipv4(datagram.priority_control);
+                let packet = datagram.to_ipv4(64);
                 self.datagram_sender_handle
                     .tx
                     .send(packet)
@@ -47,31 +70,45 @@ impl MessageSender {
         }
     }
 
-    #[allow(unused)]
-    async fn handle_resend(&self, datagram: HomaDatagram) {}
+    async fn send_unscheduled_datagrams(&mut self) -> Option<HomaDatagram> {
+        self.send_datagram_slice(0, UNSCHEDULED_HOMA_DATAGRAM_LIMIT)
+            .await;
+        for i in 1..=5 {
+            select! {
+                _ = sleep(Duration::from_millis(400*i)) => {
+                    self.send_datagram_slice(0, UNSCHEDULED_HOMA_DATAGRAM_LIMIT)
+                        .await;
+                }
+                Some(datagram) = self.rx.recv() => {
+                    return Some(datagram);
+                }
+            }
+        }
+        None
+    }
+
+    async fn send_requested_datagrams(&mut self, datagram: HomaDatagram) {
+        self.handle_datagram(datagram).await;
+        loop {
+            select! {
+                _ = sleep(Duration::from_millis(800)) => {
+                    return;
+                }
+                Some(datagram) = self.rx.recv() => {
+                    if self.check_message(&datagram) {
+                        return
+                    }
+                    self.handle_datagram(datagram).await;
+                }
+            }
+        }
+    }
 }
 
 async fn run_message_sender(mut message_sender: MessageSender) {
-    use crate::actors::application::ApplicationMessage::*;
-    message_sender.send_rtt_bytes().await;
-    println!("Sent rtt bytes");
-    while let Some(datagram) = message_sender.rx.recv().await {
-        if let Grant = datagram.datagram_type {
-            println!("Received grant: {}", datagram.sequence_number);
-            if datagram.sequence_number == message_sender.datagrams.len() as u64 {
-                println!("Received last grant");
-                break;
-            }
-        }
-        message_sender.handle_datagram(datagram).await;
+    if let Some(datagram) = message_sender.send_unscheduled_datagrams().await {
+        message_sender.send_requested_datagrams(datagram).await;
     }
-    message_sender
-        .application_handle
-        .tx
-        .send(FromMessageSender(message_sender.message.id))
-        .await
-        .unwrap();
-    println!("End of message sender")
 }
 
 #[derive(Clone)]
@@ -82,17 +119,19 @@ pub struct MessageSenderHandle {
 impl MessageSenderHandle {
     pub fn new(
         message: HomaMessage,
-        datagram_sender_handle: DatagramSenderHandle,
         application_handle: ApplicationHandle,
+        priority_manager_handle: PriorityManagerHandle,
+        datagram_sender_handle: DatagramSenderHandle,
     ) -> (Self, JoinHandle<()>) {
-        let (tx, rx) = channel::<HomaDatagram>(100);
+        let (tx, rx) = channel::<HomaDatagram>(1000);
         let datagrams = message.split();
         let message_sender = MessageSender {
             rx,
             message,
             datagrams,
-            datagram_sender_handle,
             application_handle,
+            priority_manager_handle,
+            datagram_sender_handle,
         };
         let join_handle = tokio::spawn(run_message_sender(message_sender));
         (Self { tx }, join_handle)
