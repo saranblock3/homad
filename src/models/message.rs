@@ -1,8 +1,10 @@
+use async_std::io::ReadExt;
+use async_std::os::unix::net::UnixStream;
 use bincode::deserialize;
 use datagram::HomaDatagramType;
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
-use std::os::unix::net::UnixStream;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::{cmp::min, io::Read};
 
 use crate::constants::{HOMA_DATAGRAM_PAYLOAD_LENGTH, HOMA_MESSAGE_MAX_LENGTH};
@@ -21,10 +23,10 @@ pub struct HomaMessage {
 }
 
 impl HomaMessage {
-    pub fn from_unix_stream(stream: &mut UnixStream) -> Result<Option<Self>, String> {
+    pub async fn from_unix_stream(stream: &mut UnixStream) -> Result<Option<Self>, String> {
         let mut size_buffer = [0u8; 8];
 
-        if let Err(_) = stream.read_exact(&mut size_buffer) {
+        if let Err(_) = stream.read_exact(&mut size_buffer).await {
             println!("FROM UNIX STREAM FAILED SIZE");
             return Err("stream not read".to_string());
         }
@@ -37,7 +39,10 @@ impl HomaMessage {
         }
 
         let mut buffer = vec![0; size as usize];
-        stream.read_exact(&mut buffer).unwrap();
+        stream
+            .read_exact(&mut buffer)
+            .await
+            .map_err(|_| "FROM UNIX STREAM FAILED MESSAGE")?;
         let result = deserialize(&buffer).ok();
         if let None = result {
             println!("FROM UNIX STREAM FAILED MESSAGE");

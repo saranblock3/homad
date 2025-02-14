@@ -3,6 +3,7 @@ use super::application::{
     ApplicationMessage::{FromApplicationReader, Shutdown},
 };
 use crate::models::message::HomaMessage;
+use async_std::os::unix::net;
 use std::{os::unix::net::UnixStream, thread};
 
 pub struct ApplicationReader {
@@ -16,14 +17,16 @@ impl ApplicationReader {
             stream,
             application_handle,
         };
-        thread::spawn(move || {
-            run_application_reader(application_reader);
-        });
+        // thread::spawn(move || {
+        //     run_application_reader(application_reader);
+        // });
+        tokio::spawn(run_application_reader(application_reader));
     }
 }
 
-fn run_application_reader(mut application_reader: ApplicationReader) {
-    while let Ok(message_option) = HomaMessage::from_unix_stream(&mut application_reader.stream) {
+async fn run_application_reader(application_reader: ApplicationReader) {
+    let mut stream = net::UnixStream::from(application_reader.stream.try_clone().unwrap());
+    while let Ok(message_option) = HomaMessage::from_unix_stream(&mut stream).await {
         if let Some(message) = message_option {
             println!(
                 "APPLICATION READER (ID: {}) (ID: {}) READ MESSAGE",
@@ -31,13 +34,16 @@ fn run_application_reader(mut application_reader: ApplicationReader) {
             );
             application_reader
                 .application_handle
-                .blocking_send(FromApplicationReader(message))
+                .send(FromApplicationReader(message))
+                .await
                 .expect("ApplicationReader -> Application failed");
         }
     }
-    let _ = application_reader.stream.shutdown(std::net::Shutdown::Both);
+    // let _ = application_reader.stream.shutdown(std::net::Shutdown::Both);
+    let _ = stream.shutdown(std::net::Shutdown::Both);
     application_reader
         .application_handle
-        .blocking_send(Shutdown)
+        .send(Shutdown)
+        .await
         .expect("ApplicationReader -> Application failed");
 }
