@@ -4,17 +4,16 @@ use super::{
     application::ApplicationHandle, application_reader::ApplicationReader,
     datagram_sender::DatagramSenderHandle,
 };
-use crate::models::message::HomaMessage;
 use crate::{
-    actors::application_writer::ApplicationWriterHandle, constants::HOMA_SOCKET_PATH,
+    actors::application_writer::ApplicationWriterHandle,
     models::registration::HomaRegistrationMessage,
 };
 use std::{
     collections::HashMap,
-    fs,
-    os::unix::net::{UnixListener, UnixStream},
+    os::unix::net::UnixStream,
     sync::{Arc, Mutex},
 };
+use tokio::sync::mpsc::error::SendError;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 
 pub struct ApplicationRegistrar {
@@ -83,7 +82,7 @@ fn run_application_registrar(mut application_registrar: ApplicationRegistrar) {
 
 #[derive(Clone)]
 pub struct ApplicationRegistrarHandle {
-    pub tx: Sender<ApplicationRegistrarMessage>,
+    tx: Sender<ApplicationRegistrarMessage>,
 }
 
 impl ApplicationRegistrarHandle {
@@ -93,7 +92,7 @@ impl ApplicationRegistrarHandle {
         workload_manager_handle: WorkloadManagerHandle,
         datagram_sender_handle: DatagramSenderHandle,
     ) -> Self {
-        let (tx, rx) = channel::<ApplicationRegistrarMessage>(1000);
+        let (tx, rx) = channel::<ApplicationRegistrarMessage>(10000);
         let application_registrar_handle = Self { tx };
         let application_registrar = ApplicationRegistrar {
             applications,
@@ -105,5 +104,19 @@ impl ApplicationRegistrarHandle {
         };
         tokio::task::spawn_blocking(move || run_application_registrar(application_registrar));
         application_registrar_handle
+    }
+
+    pub async fn send(
+        &self,
+        application_registrar_message: ApplicationRegistrarMessage,
+    ) -> Result<(), SendError<ApplicationRegistrarMessage>> {
+        self.tx.send(application_registrar_message).await
+    }
+
+    pub fn blocking_send(
+        &self,
+        application_registrar_message: ApplicationRegistrarMessage,
+    ) -> Result<(), SendError<ApplicationRegistrarMessage>> {
+        self.tx.blocking_send(application_registrar_message)
     }
 }

@@ -1,199 +1,113 @@
-use priority_queue::PriorityQueue;
-use std::{
-    cmp::{Ordering, Reverse},
-    collections::HashMap,
-};
-use tokio::sync::{
-    mpsc::{self},
-    oneshot::{self, channel},
-};
+use crate::constants::{HOMA_DATAGRAM_PAYLOAD_LENGTH, UNSCHEDULED_HOMA_DATAGRAM_LIMIT};
+use crate::utils::quantile;
+use std::collections::VecDeque;
+use std::thread;
+use tokio::sync::mpsc::error::SendError;
+use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::sync::oneshot;
 
-const SCHEDULED_PRIORITY_LEVELS: usize = 10;
-const PRIORITY_LEVEL_WIDTH: usize = 8;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PriorityLevelEntry {
-    Occupied((u64, u64)),
-    Empty,
-}
-
-impl PartialOrd for PriorityLevelEntry {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for PriorityLevelEntry {
-    fn cmp(&self, other: &Self) -> Ordering {
-        match (self, other) {
-            (Self::Empty, Self::Empty) => Ordering::Equal,
-            (Self::Occupied(_), Self::Empty) => Ordering::Less,
-            (Self::Empty, Self::Occupied(_)) => Ordering::Greater,
-            (Self::Occupied((_, x)), Self::Occupied((_, y))) => x.cmp(y).reverse(),
-        }
-    }
-}
+const UNSCHEDULED_PRIORITY_LEVELS: usize = 6;
 
 struct WorkloadManager {
-    rx: mpsc::Receiver<WorkloadManagerMessage>,
-    queue: PriorityQueue<(u64, u64), Reverse<u64>>,
-    senders: HashMap<u64, oneshot::Sender<()>>,
-    priority_levels: [PriorityLevelEntry; SCHEDULED_PRIORITY_LEVELS],
+    message_lengths: Vec<u64>,
+    priority_level_partitions: Vec<u64>,
+    rx: Receiver<WorkloadManagerMessage>,
 }
 
+// The Application should register each new incoming message with the WorkloadManager.
+// The WorkloadManager will then calculate the appropriate partitions to be piggybacked
+// by each MessageSender/MessageReceiver. The WorkloadManager will also be queried by the
+// Application for the appropriate priority to send unscheduled datagrams to a remote host.
+
 impl WorkloadManager {
-    fn sort_priority_levels(&mut self) {
-        self.priority_levels.sort();
-    }
-
-    fn find_empty_entry_positions(&mut self) -> Vec<usize> {
-        use PriorityLevelEntry::*;
-        self.priority_levels
-            .iter()
-            .enumerate()
-            .filter(|entry| *entry.1 == Empty)
-            .map(|entry| entry.0)
-            .collect()
-    }
-
-    fn find_message_position(&mut self, id: u64) -> Option<usize> {
-        use PriorityLevelEntry::*;
-        self.priority_levels.iter().position(|entry| {
-            if let Occupied((existing_id, _)) = entry {
-                return id == *existing_id;
-            }
-            false
-        })
-    }
-
-    fn find_message(&mut self, id: u64) -> Option<&mut PriorityLevelEntry> {
-        if let Some(position) = self.find_message_position(id) {
-            return self.priority_levels.get_mut(position);
-        }
-        return None;
-    }
-
-    fn update_message(&mut self, id: u64, remaining_datagrams: u64) -> Option<u8> {
-        use PriorityLevelEntry::*;
-        if let Some(entry) = self.find_message(id) {
-            *entry = Occupied((id, remaining_datagrams));
-            self.sort_priority_levels();
-        }
-        if let Some(position) = self.find_message_position(id) {
-            return Some(position as u8 * PRIORITY_LEVEL_WIDTH as u8);
-        }
-        None
-    }
-
-    fn handle_register_message(
-        &mut self,
-        id: u64,
-        remaining_datagrams: u64,
-        tx: oneshot::Sender<()>,
-    ) {
-        self.queue
-            .push((id, remaining_datagrams), Reverse(remaining_datagrams));
-        self.senders.insert(id, tx);
-        self.try_activate_messages();
-    }
-
-    fn handle_get_priority(&mut self, id: u64, remaining_datagrams: u64, tx: oneshot::Sender<u8>) {
-        if let Some(priority) = self.update_message(id, remaining_datagrams) {
-            tx.send(priority).unwrap();
-        }
-    }
-
-    fn handle_unregister_message(&mut self, id: u64) {
-        use PriorityLevelEntry::*;
-        if let Some(entry) = self.find_message(id) {
-            *entry = Empty;
-            self.try_activate_messages();
-        }
-    }
-
-    fn try_activate_messages(&mut self) {
-        use PriorityLevelEntry::*;
-        let empty_positions = self.find_empty_entry_positions();
-        for position in empty_positions {
-            if let Some((entry, _)) = self.queue.pop() {
-                self.priority_levels[position] = Occupied(entry);
-                let tx = self.senders.remove(&entry.0).unwrap();
-                tx.send(()).unwrap();
-            }
-        }
-        self.sort_priority_levels();
-    }
-
     fn handle_workload_manager_message(
         &mut self,
         workload_manager_message: WorkloadManagerMessage,
     ) {
         use WorkloadManagerMessage::*;
         match workload_manager_message {
-            RegisterMessage((id, remaining_datagrams, tx)) => {
-                self.handle_register_message(id, remaining_datagrams, tx);
+            PutMessageLength(message_length) => self.handle_put_message_length(message_length),
+            GetPriorityLevelPartitions(return_chan) => {
+                self.handle_get_priority_level_partitions(return_chan)
             }
-            GetPriority((id, remaining_datagrams, tx)) => {
-                self.handle_get_priority(id, remaining_datagrams, tx);
+        }
+    }
+
+    fn handle_put_message_length(&mut self, message_length: u64) {
+        let i = self
+            .message_lengths
+            .binary_search(&message_length)
+            .unwrap_or_else(|j| j);
+        self.message_lengths.insert(i, message_length);
+        self.calculate_priority_level_partitions();
+    }
+
+    fn handle_get_priority_level_partitions(&self, return_chan: oneshot::Sender<Vec<u64>>) {
+        let _ = return_chan.send(self.priority_level_partitions.clone());
+    }
+
+    fn calculate_priority_level_partitions(&mut self) {
+        self.priority_level_partitions = vec![];
+        if self.message_lengths.len() < 100 {
+            let rtt_bytes = UNSCHEDULED_HOMA_DATAGRAM_LIMIT * HOMA_DATAGRAM_PAYLOAD_LENGTH as usize;
+            let priority_level_width = rtt_bytes / UNSCHEDULED_PRIORITY_LEVELS;
+            for i in 1..UNSCHEDULED_PRIORITY_LEVELS {
+                let partition = (i * priority_level_width) as u64;
+                self.priority_level_partitions.push(partition);
             }
-            UnregisterMessage(id) => {
-                self.handle_unregister_message(id);
+        } else {
+            for i in 1..UNSCHEDULED_PRIORITY_LEVELS {
+                let q = (1. / UNSCHEDULED_PRIORITY_LEVELS as f32) * i as f32;
+                self.priority_level_partitions
+                    .push(quantile(&self.message_lengths, q));
             }
-        };
-        println!("WORKLOAD MANAGER: {:?}", self.priority_levels);
+        }
     }
 }
 
-pub enum WorkloadManagerMessage {
-    RegisterMessage((u64, u64, oneshot::Sender<()>)),
-    GetPriority((u64, u64, oneshot::Sender<u8>)),
-    UnregisterMessage(u64),
-}
-
 fn run_workload_manager(mut workload_manager: WorkloadManager) {
+    workload_manager.calculate_priority_level_partitions();
     while let Some(workload_manager_message) = workload_manager.rx.blocking_recv() {
         workload_manager.handle_workload_manager_message(workload_manager_message);
     }
 }
 
+pub enum WorkloadManagerMessage {
+    PutMessageLength(u64),
+    GetPriorityLevelPartitions(oneshot::Sender<Vec<u64>>),
+}
+
 #[derive(Clone)]
 pub struct WorkloadManagerHandle {
-    pub tx: mpsc::Sender<WorkloadManagerMessage>,
+    pub tx: Sender<WorkloadManagerMessage>,
 }
 
 impl WorkloadManagerHandle {
     pub fn new() -> Self {
-        let (tx, rx) = mpsc::channel::<WorkloadManagerMessage>(1000);
-        use PriorityLevelEntry::*;
+        let (tx, rx) = channel::<WorkloadManagerMessage>(10000);
         let workload_manager = WorkloadManager {
             rx,
-            queue: PriorityQueue::new(),
-            senders: HashMap::new(),
-            priority_levels: [Empty; SCHEDULED_PRIORITY_LEVELS],
+            message_lengths: Vec::new(),
+            priority_level_partitions: Vec::new(),
         };
-        tokio::task::spawn_blocking(move || run_workload_manager(workload_manager));
+        thread::spawn(move || run_workload_manager(workload_manager));
         Self { tx }
     }
 
-    pub async fn register_message(&self, message_id: u64, remaining_bytes: u64) {
+    pub async fn put_message_length(&self, message_length: u64) -> Result<(), ()> {
         use WorkloadManagerMessage::*;
-        let (tx, rx) = channel::<()>();
-        let workload_manager_message = RegisterMessage((message_id, remaining_bytes, tx));
-        self.tx.send(workload_manager_message).await.unwrap();
-        rx.await.unwrap();
+        let workload_manager_message = PutMessageLength(message_length);
+        self.tx.send(workload_manager_message).await.map_err(|_| ())
     }
 
-    pub async fn get_priority(&self, message_id: u64, remaining_datagrams: u64) -> u8 {
+    pub async fn get_priority_level_partitions(&self) -> Result<Vec<u64>, ()> {
+        let (tx, rx) = oneshot::channel::<Vec<u64>>();
         use WorkloadManagerMessage::*;
-        let (tx, rx) = channel::<u8>();
-        let workload_manager_message = GetPriority((message_id, remaining_datagrams, tx));
-        self.tx.send(workload_manager_message).await.unwrap();
-        rx.await.unwrap()
-    }
-
-    pub async fn unregister_message(&self, message_id: u64) {
-        use WorkloadManagerMessage::*;
-        let workload_manager_message = UnregisterMessage(message_id);
-        self.tx.send(workload_manager_message).await.unwrap();
+        let workload_manager_message = GetPriorityLevelPartitions(tx);
+        self.tx
+            .send(workload_manager_message)
+            .await
+            .map_err(|_| ())?;
+        rx.await.map_err(|_| ())
     }
 }

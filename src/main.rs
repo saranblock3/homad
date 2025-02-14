@@ -1,20 +1,21 @@
 mod actors;
 mod constants;
-mod homa;
 mod models;
 mod utils;
 
 use crate::actors::application_listener::ApplicationListener;
 use crate::actors::application_registrar::ApplicationRegistrarHandle;
+use actors::workload_manager::*;
 use actors::{
-    application::ApplicationHandle, application_registrar::ApplicationRegistrar,
-    datagram_receiver::DatagramReceiver, datagram_sender::DatagramSenderHandle,
-    priority_manager::PriorityManagerHandle, workload_manager::WorkloadManagerHandle,
+    application::ApplicationHandle, datagram_receiver::DatagramReceiver,
+    datagram_sender::DatagramSenderHandle, priority_manager::PriorityManagerHandle,
 };
 use pnet::packet::ip::IpNextHeaderProtocol;
 use pnet::transport::transport_channel;
 use pnet::transport::TransportChannelType::Layer4;
 use pnet::transport::TransportProtocol::Ipv4;
+use rand::{random, thread_rng, Rng};
+use std::ops::Range;
 use std::{
     collections::HashMap,
     io,
@@ -23,10 +24,11 @@ use std::{
 
 async fn start_homa() -> Result<(), io::Error> {
     let (transport_sender, transport_receiver) =
-        transport_channel(4096, Layer4(Ipv4(IpNextHeaderProtocol(146))))?;
+        transport_channel(3000000, Layer4(Ipv4(IpNextHeaderProtocol(146))))?;
+
+    let workload_manager_handle = WorkloadManagerHandle::new();
 
     let priority_manager_handle = PriorityManagerHandle::new();
-    let workload_manager_handle = WorkloadManagerHandle::new();
 
     let datagram_sender_handle = DatagramSenderHandle::new(transport_sender);
 

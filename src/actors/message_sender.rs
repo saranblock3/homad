@@ -1,9 +1,11 @@
 use super::application::ApplicationHandle;
 use super::datagram_sender::DatagramSenderHandle;
 use super::priority_manager::PriorityManagerHandle;
+use super::workload_manager::{self, WorkloadManagerHandle};
 use crate::constants::UNSCHEDULED_HOMA_DATAGRAM_LIMIT;
-use crate::models::datagram::HomaDatagramType::Grant;
 use crate::models::{datagram::HomaDatagram, message::HomaMessage};
+use rand::Rng;
+use std::ops::Range;
 use tokio::select;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::task::JoinHandle;
@@ -15,7 +17,10 @@ struct MessageSender {
     datagrams: Vec<HomaDatagram>,
     application_handle: ApplicationHandle,
     priority_manager_handle: PriorityManagerHandle,
+    workload_manager_handle: WorkloadManagerHandle,
     datagram_sender_handle: DatagramSenderHandle,
+    unscheduled_priority: u8,
+    workload: Vec<u64>,
 }
 
 impl MessageSender {
@@ -28,11 +33,15 @@ impl MessageSender {
         }
     }
 
-    async fn handle_grant(&self, grant_datagram: HomaDatagram) {
-        if let Some(next_datagram) = self.datagrams.get(grant_datagram.sequence_number as usize) {
-            let packet = next_datagram.to_ipv4(next_datagram.priority);
+    async fn handle_grant(&self, grant: HomaDatagram) {
+        if let Some(data) = self.datagrams.get(grant.sequence_number as usize) {
+            data.to_owned().workload = self.workload.clone();
+            let packet = data.to_ipv4(grant.priority);
+            println!(
+                "MESSAGE SENDER (ID: {}) (ID: {}) RECEIVED GRANT FROM (ID: {})",
+                grant.destination_id, grant.message_id, grant.source_id
+            );
             self.datagram_sender_handle
-                .tx
                 .send(packet)
                 .await
                 .expect("MessageSender -> DatagramSender failed");
@@ -41,9 +50,9 @@ impl MessageSender {
 
     async fn handle_resend(&self, resend_datagram: HomaDatagram) {
         if let Some(next_datagram) = self.datagrams.get(resend_datagram.sequence_number as usize) {
+            next_datagram.to_owned().workload = self.workload.clone();
             let packet = next_datagram.to_ipv4(resend_datagram.priority);
             self.datagram_sender_handle
-                .tx
                 .send(packet)
                 .await
                 .expect("MessageSender -> DatagramSender failed");
@@ -60,9 +69,11 @@ impl MessageSender {
     async fn send_datagram_slice(&mut self, start: usize, end: usize) {
         for i in start..end {
             if let Some(datagram) = self.datagrams.get(i) {
-                let packet = datagram.to_ipv4(64);
+                let mut datagram = datagram.to_owned();
+                datagram.workload = self.workload.clone();
+                datagram.priority = self.unscheduled_priority;
+                let packet = datagram.to_ipv4(self.unscheduled_priority);
                 self.datagram_sender_handle
-                    .tx
                     .send(packet)
                     .await
                     .expect("MessageSender -> DatagramSender failed");
@@ -73,42 +84,98 @@ impl MessageSender {
     async fn send_unscheduled_datagrams(&mut self) -> Option<HomaDatagram> {
         self.send_datagram_slice(0, UNSCHEDULED_HOMA_DATAGRAM_LIMIT)
             .await;
-        for i in 1..=5 {
+        println!(
+            "MESSAGE SENDER (ID: {}) (ID: {}) SENT UNSCHEDULED DATAGRAMS TO (ID: {})",
+            self.message.source_id, self.message.id, self.message.destination_id
+        );
+        let mut resend_counter = 0;
+        loop {
+            let resend_timeout_millis = rand::thread_rng().gen_range::<u64, Range<u64>>(500..2000);
             select! {
-                _ = sleep(Duration::from_millis(400*i)) => {
+                _ = sleep(Duration::from_millis(resend_timeout_millis)) => {
+                    if resend_counter == 5 {
+                        return None
+                    }
                     self.send_datagram_slice(0, UNSCHEDULED_HOMA_DATAGRAM_LIMIT)
                         .await;
+                    println!(
+                        "MESSAGE SENDER (ID: {}) (ID: {}) SENT UNSCHEDULED DATAGRAMS (ID: {})",
+                        self.message.source_id, self.message.id, self.message.destination_id
+                    );
+                    resend_counter += 1;
                 }
                 Some(datagram) = self.rx.recv() => {
+                    self.priority_manager_handle
+                        .put_unscheduled_priority_level_partitions(
+                            datagram.source_address.clone(),
+                            datagram.workload.clone(),
+                        )
+                        .await;
                     return Some(datagram);
                 }
             }
         }
-        None
     }
 
     async fn send_requested_datagrams(&mut self, datagram: HomaDatagram) {
         self.handle_datagram(datagram).await;
         loop {
             select! {
-                _ = sleep(Duration::from_millis(800)) => {
+                _ = sleep(Duration::from_millis(10000)) => {
+                    println!(
+                        "DIED SCHEDULED {}", self.message.source_id
+                    );
                     return;
                 }
                 Some(datagram) = self.rx.recv() => {
+                    self.priority_manager_handle
+                        .put_unscheduled_priority_level_partitions(
+                            datagram.source_address.clone(),
+                            datagram.workload.clone(),
+                        )
+                        .await;
                     if self.check_message(&datagram) {
                         return
                     }
+                    println!(
+                        "MESSAGE SENDER (ID: {}) (ID: {}) SENT SCHEDULED DATAGRAM {} (ID: {})",
+                        self.message.source_id, self.message.id, datagram.sequence_number, self.message.destination_id
+                    );
                     self.handle_datagram(datagram).await;
                 }
             }
         }
     }
+
+    async fn complete(&mut self) {
+        use crate::actors::application::ApplicationMessage::*;
+        self.rx.close();
+        let _ = self
+            .application_handle
+            .send(FromMessageSender(self.message.id))
+            .await;
+    }
 }
 
 async fn run_message_sender(mut message_sender: MessageSender) {
+    message_sender.unscheduled_priority = message_sender
+        .priority_manager_handle
+        .get_unscheduled_priority(
+            message_sender.message.destination_address.clone(),
+            message_sender.message.content.len() as u64,
+        )
+        .await;
+    message_sender.workload = message_sender
+        .workload_manager_handle
+        .get_priority_level_partitions()
+        .await
+        .expect("MessageSender -> WorkloadManager failed");
     if let Some(datagram) = message_sender.send_unscheduled_datagrams().await {
-        message_sender.send_requested_datagrams(datagram).await;
+        if !message_sender.check_message(&datagram) {
+            message_sender.send_requested_datagrams(datagram).await;
+        }
     }
+    message_sender.complete().await;
 }
 
 #[derive(Clone)]
@@ -121,9 +188,10 @@ impl MessageSenderHandle {
         message: HomaMessage,
         application_handle: ApplicationHandle,
         priority_manager_handle: PriorityManagerHandle,
+        workload_manager_handle: WorkloadManagerHandle,
         datagram_sender_handle: DatagramSenderHandle,
     ) -> (Self, JoinHandle<()>) {
-        let (tx, rx) = channel::<HomaDatagram>(1000);
+        let (tx, rx) = channel::<HomaDatagram>(100000);
         let datagrams = message.split();
         let message_sender = MessageSender {
             rx,
@@ -131,7 +199,10 @@ impl MessageSenderHandle {
             datagrams,
             application_handle,
             priority_manager_handle,
+            workload_manager_handle,
             datagram_sender_handle,
+            unscheduled_priority: 0,
+            workload: Vec::new(),
         };
         let join_handle = tokio::spawn(run_message_sender(message_sender));
         (Self { tx }, join_handle)

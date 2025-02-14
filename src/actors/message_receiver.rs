@@ -1,18 +1,16 @@
-use std::cmp::min;
-
 use super::{
     application::ApplicationHandle, datagram_sender::DatagramSenderHandle,
     priority_manager::PriorityManagerHandle, workload_manager::WorkloadManagerHandle,
 };
 use crate::{
-    constants::{
-        HOMA_DATAGRAM_PAYLOAD_LENGTH, MESSAGE_RECEIVER_TIMEOUT, UNSCHEDULED_HOMA_DATAGRAM_LIMIT,
-    },
+    constants::{HOMA_DATAGRAM_PAYLOAD_LENGTH, UNSCHEDULED_HOMA_DATAGRAM_LIMIT},
     models::{
         datagram::{HomaDatagram, HomaDatagramType},
         message::{HomaMessage, HomaMessageBuilder},
     },
 };
+use rand::Rng;
+use std::ops::Range;
 use tokio::{
     select,
     sync::mpsc::{channel, Receiver, Sender},
@@ -47,6 +45,7 @@ struct MessageReceiver {
     collected: u64,
     unscheduled_only: bool,
     datagrams: Vec<Option<HomaDatagram>>,
+    workload: Vec<u64>,
 }
 
 impl MessageReceiver {
@@ -67,11 +66,18 @@ impl MessageReceiver {
             if let Complete = self.check_message_unscheduled() {
                 return Complete;
             }
-            let resend_timeout = sleep(Duration::from_millis(200));
+            let resend_timeout_millis = rand::thread_rng().gen_range::<u64, Range<u64>>(400..2000);
             select! {
-                _ = resend_timeout => {
+                _ = sleep(Duration::from_millis(resend_timeout_millis))=> {
+                    // if resend_counter == 300 {
+                    //     println!(
+                    //         "MESSAGE RECEIVER (ID: {}) (ID: {}) DIED",
+                    //         self.datagram.destination_id, self.message_id
+                    //     );
+                    //     return Incomplete;
+                    // }
                     if resend_counter == 5 {
-                        return Incomplete;
+                        return Incomplete
                     }
                     self.request_resend_unscheduled_datagrams().await;
                     resend_counter += 1
@@ -81,6 +87,12 @@ impl MessageReceiver {
                         "MESSAGE RECEIVER (ID: {}) (ID: {}) RECEIVED UNSCHEDULED DATAGRAM FROM (ID: {})",
                         datagram.destination_id, datagram.message_id, datagram.source_id
                     );
+                    self.priority_manager_handle
+                        .put_unscheduled_priority_level_partitions(
+                            datagram.source_address.clone(),
+                            datagram.workload.clone(),
+                        )
+                        .await;
                     self.add_datagram(datagram);
                 }
             }
@@ -95,52 +107,59 @@ impl MessageReceiver {
         resend.destination_address = self.source_address.clone();
         resend.source_id = self.destination_id;
         resend.destination_id = self.source_id;
+        resend.workload = self.workload.clone();
         for i in 0..UNSCHEDULED_HOMA_DATAGRAM_LIMIT {
             if let Some(None) = self.datagrams.get(i) {
                 let mut resend = resend.clone();
                 resend.sequence_number = i as u64;
                 self.datagram_sender_handle
-                    .tx
-                    .send(resend.to_ipv4(64))
+                    .send(resend.to_ipv4(56))
                     .await
-                    .unwrap();
+                    .expect("MessageReceiver -> DatagramSender failed");
             }
         }
     }
 
     pub async fn receive_scheduled_datagrams(&mut self) -> ScheduledState {
         use ScheduledState::*;
-        self.workload_manager_handle
-            .register_message(self.message_id, self.expected - self.collected)
+        self.priority_manager_handle
+            .register_scheduled_message(self.message_id, self.expected - self.collected)
             .await;
         println!(
             "MESSAGE RECEIVER (ID: {}) (ID: {}) REGISTERED",
             self.datagram.destination_id, self.message_id
         );
         let priority = self
-            .workload_manager_handle
-            .get_priority(self.message_id, self.expected - self.collected)
+            .priority_manager_handle
+            .get_scheduled_priority(self.message_id, self.expected - self.collected)
             .await;
         println!(
             "MESSAGE RECEIVER (ID: {}) (ID: {}) RECEIVED FIRST PRIORITY",
             self.datagram.destination_id, self.message_id
         );
+        self.priority_manager_handle
+            .put_unscheduled_priority_level_partitions(
+                self.datagram.source_address.clone(),
+                self.datagram.workload.clone(),
+            )
+            .await;
         self.grant(self.collected, priority).await;
         let mut resend_counter = 0;
+        let resend_timeout_millis = rand::thread_rng().gen_range::<u64, Range<u64>>(400..2000);
         loop {
             select! {
-                _ = sleep(Duration::from_millis(2000)) => {
+                _ = sleep(Duration::from_millis(resend_timeout_millis)) => {
                     if resend_counter == 5 {
                         println!(
                             "MESSAGE RECEIVER (ID: {}) (ID: {}) DIED",
                             self.datagram.destination_id, self.message_id
                         );
-                        self.workload_manager_handle
-                            .unregister_message(self.message_id)
+                        self.priority_manager_handle
+                            .unregister_scheduled_message(self.message_id)
                             .await;
                         return Incomplete;
                     }
-                    let priority = self.workload_manager_handle.get_priority(
+                    let priority = self.priority_manager_handle.get_scheduled_priority(
                         self.message_id,
                         self.expected - self.collected
                     ).await;
@@ -152,18 +171,24 @@ impl MessageReceiver {
                     resend_counter += 1;
                 }
                 Some(datagram) = self.rx.recv() => {
+                    self.priority_manager_handle
+                                .put_unscheduled_priority_level_partitions(
+                                    datagram.source_address.clone(),
+                                    datagram.workload.clone(),
+                                )
+                                .await;
                     println!(
                         "MESSAGE RECEIVER (ID: {}) (ID: {}) RECEIVED SCHEDULED DATAGRAM FROM (ID: {})",
                         datagram.destination_id, datagram.message_id, datagram.source_id
                     );
                     self.add_datagram(datagram);
                     if let Complete =  self.check_message_scheduled() {
-                        self.workload_manager_handle
-                            .unregister_message(self.message_id)
+                        self.priority_manager_handle
+                            .unregister_scheduled_message(self.message_id)
                             .await;
                         return Complete;
                     }
-                    let priority = self.workload_manager_handle.get_priority(
+                    let priority = self.priority_manager_handle.get_scheduled_priority(
                         self.message_id,
                         self.expected - self.collected
                     ).await;
@@ -202,19 +227,25 @@ impl MessageReceiver {
         grant.destination_id = self.source_id;
         grant.sequence_number = sequence_number;
         grant.priority = priority;
-        let grant_ip = grant.to_ipv4(64);
-        self.datagram_sender_handle.tx.send(grant_ip).await.unwrap();
+        grant.workload = self.workload.clone();
+        println!("@@@ {:?}", grant);
+        let grant_ip = grant.to_ipv4(56);
+        self.datagram_sender_handle
+            .send(grant_ip)
+            .await
+            .expect("MessageReceiver -> DatagramSender failed");
+        println!("MESSAGE RECEIVER SENT GRANT");
     }
 
-    async fn complete(&self) {
+    async fn complete(&mut self) {
         use crate::actors::application::ApplicationMessage::*;
         self.grant(self.expected, 0).await;
         let message = self.build_message();
-        self.application_handle
-            .tx
+        self.rx.close();
+        let _ = self
+            .application_handle
             .send(FromMessageReceiver(message))
-            .await
-            .unwrap();
+            .await;
     }
 
     pub fn build_message(&self) -> HomaMessage {
@@ -238,6 +269,16 @@ impl MessageReceiver {
 }
 
 async fn run_message_receiver(mut message_receiver: MessageReceiver) {
+    message_receiver
+        .workload_manager_handle
+        .put_message_length(message_receiver.datagram.message_length)
+        .await
+        .expect("MessageReceiver -> WorkloadManager failed");
+    message_receiver.workload = message_receiver
+        .workload_manager_handle
+        .get_priority_level_partitions()
+        .await
+        .expect("MessageReceiver -> WorkloadManager failed");
     if let UnscheduledState::Incomplete = message_receiver.receive_unscheduled_datagrams().await {
         println!(
             "MESSAGE RECEIVER (ID: {}) (ID: {}) FAILED TO RECEIVE ALL UNSCHEDULED DATAGRAMS",
@@ -284,7 +325,7 @@ impl MessageReceiverHandle {
         workload_manager_handle: WorkloadManagerHandle,
         application_handle: ApplicationHandle,
     ) -> (Self, JoinHandle<()>) {
-        let (tx, rx) = channel::<HomaDatagram>(1000);
+        let (tx, rx) = channel::<HomaDatagram>(100000);
 
         let expected = (datagram.message_length + (HOMA_DATAGRAM_PAYLOAD_LENGTH as u64) - 1)
             / HOMA_DATAGRAM_PAYLOAD_LENGTH as u64;
@@ -313,6 +354,7 @@ impl MessageReceiverHandle {
             collected: 1,
             unscheduled_only,
             datagrams,
+            workload: Vec::new(),
         };
         let join_handle = tokio::spawn(run_message_receiver(message_receiver_actor));
         (Self { tx }, join_handle)

@@ -36,7 +36,7 @@ pub struct ApplicationWriterHandle {
 
 impl ApplicationWriterHandle {
     pub fn new(stream: UnixStream) -> Self {
-        let (tx, rx) = channel::<HomaMessage>(1000);
+        let (tx, rx) = channel::<HomaMessage>(100000);
         let application_writer = ApplicationWriter { stream, rx };
         thread::spawn(move || {
             run_application_writer(application_writer);

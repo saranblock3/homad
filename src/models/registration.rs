@@ -12,7 +12,7 @@ impl HomaRegistrationMessage {
     pub fn from_unix_stream(stream: &mut UnixStream) -> Result<Self, bincode::Error> {
         let mut buffer = [0u8; 4];
 
-        stream.read_exact(&mut buffer).unwrap();
+        stream.read_exact(&mut buffer)?;
 
         deserialize(&buffer)
     }

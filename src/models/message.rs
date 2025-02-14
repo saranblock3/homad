@@ -2,10 +2,7 @@ use bincode::deserialize;
 use datagram::HomaDatagramType;
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
-use std::io::Error;
-use std::iter::StepBy;
 use std::os::unix::net::UnixStream;
-use std::sync::Arc;
 use std::{cmp::min, io::Read};
 
 use crate::constants::{HOMA_DATAGRAM_PAYLOAD_LENGTH, HOMA_MESSAGE_MAX_LENGTH};
@@ -24,22 +21,28 @@ pub struct HomaMessage {
 }
 
 impl HomaMessage {
-    pub fn from_unix_stream(stream: &mut UnixStream) -> Option<Self> {
+    pub fn from_unix_stream(stream: &mut UnixStream) -> Result<Option<Self>, String> {
         let mut size_buffer = [0u8; 8];
 
         if let Err(_) = stream.read_exact(&mut size_buffer) {
-            return None;
+            println!("FROM UNIX STREAM FAILED SIZE");
+            return Err("stream not read".to_string());
         }
 
         let size = u64::from_le_bytes(size_buffer);
 
         if size > HOMA_MESSAGE_MAX_LENGTH {
-            return None;
+            println!("FROM UNIX STREAM FAILED CAPACITY");
+            return Err("message too large".to_string());
         }
 
         let mut buffer = vec![0; size as usize];
         stream.read_exact(&mut buffer).unwrap();
-        return deserialize(&buffer).ok();
+        let result = deserialize(&buffer).ok();
+        if let None = result {
+            println!("FROM UNIX STREAM FAILED MESSAGE");
+        }
+        Ok(result)
     }
 
     pub fn split(&self) -> Vec<HomaDatagram> {
@@ -70,32 +73,4 @@ impl HomaMessage {
         }
         datagrams
     }
-
-    pub fn from_datagram(datagram: &HomaDatagram) -> Self {
-        HomaMessageBuilder::default()
-            .id(datagram.message_id)
-            .source_address(datagram.source_address)
-            .destination_address(datagram.destination_address)
-            .source_id(datagram.source_id)
-            .destination_id(datagram.destination_id)
-            .content(datagram.payload.clone())
-            .build()
-            .unwrap()
-    }
-
-    pub fn add_datagram(&mut self, datagram: &HomaDatagram) {}
-
-    // pub fn to_homa_datagrams(&self) -> Option<Vec<HomaDatagram>> {
-    //     let homa_datagrams = Vec::new();
-    //     let message_id = random::<u64>();
-    //     for i in (0..self.content.len()).step_by(HOMA_DATAGRAM_PAYLOAD_LENGTH as usize) {
-    //         let homa_datagram = HomaDatagram{
-    //             datagram_type: HomaDatagramType::Data,
-    //             message_id: message_id,
-    //             source_address: self.client_address,
-    //             destination_address: self.server_address,
-    //         }
-    //     }
-    //     None
-    // }
 }
