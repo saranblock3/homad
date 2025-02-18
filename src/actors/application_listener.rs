@@ -12,7 +12,8 @@ pub struct ApplicationListener {
 impl ApplicationListener {
     pub fn start(application_registrar_handle: ApplicationRegistrarHandle) {
         let _ = fs::remove_file(HOMA_SOCKET_PATH);
-        let listener = UnixListener::bind(crate::constants::HOMA_SOCKET_PATH).unwrap();
+        let listener = UnixListener::bind(crate::constants::HOMA_SOCKET_PATH)
+            .expect("ApplicationListener failed to start UnixListener");
         let application_listener = Self {
             listener,
             application_registrar_handle,

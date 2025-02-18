@@ -66,16 +66,10 @@ impl MessageReceiver {
             if let Complete = self.check_message_unscheduled() {
                 return Complete;
             }
-            let resend_timeout_millis = rand::thread_rng().gen_range::<u64, Range<u64>>(400..2000);
+            // let resend_timeout_millis = rand::thread_rng().gen_range::<u64, Range<u64>>(400..2000);
+            let resend_timeout_millis = rand::thread_rng().gen_range::<u64, Range<u64>>(20..40);
             select! {
                 _ = sleep(Duration::from_millis(resend_timeout_millis))=> {
-                    // if resend_counter == 300 {
-                    //     println!(
-                    //         "MESSAGE RECEIVER (ID: {}) (ID: {}) DIED",
-                    //         self.datagram.destination_id, self.message_id
-                    //     );
-                    //     return Incomplete;
-                    // }
                     if resend_counter == 5 {
                         return Incomplete
                     }
@@ -83,10 +77,6 @@ impl MessageReceiver {
                     resend_counter += 1
                 }
                 Some(datagram) = self.rx.recv() => {
-                    println!(
-                        "MESSAGE RECEIVER (ID: {}) (ID: {}) RECEIVED UNSCHEDULED DATAGRAM FROM (ID: {})",
-                        datagram.destination_id, datagram.message_id, datagram.source_id
-                    );
                     self.priority_manager_handle
                         .put_unscheduled_priority_level_partitions(
                             datagram.source_address.clone(),
@@ -125,35 +115,23 @@ impl MessageReceiver {
         self.priority_manager_handle
             .register_scheduled_message(self.message_id, self.expected - self.collected)
             .await;
-        println!(
-            "MESSAGE RECEIVER (ID: {}) (ID: {}) REGISTERED",
-            self.datagram.destination_id, self.message_id
-        );
         let priority = self
             .priority_manager_handle
             .get_scheduled_priority(self.message_id, self.expected - self.collected)
             .await;
-        println!(
-            "MESSAGE RECEIVER (ID: {}) (ID: {}) RECEIVED FIRST PRIORITY",
-            self.datagram.destination_id, self.message_id
-        );
         self.priority_manager_handle
             .put_unscheduled_priority_level_partitions(
-                self.datagram.source_address.clone(),
-                self.datagram.workload.clone(),
+                self.source_address.clone(),
+                self.workload.clone(),
             )
             .await;
         self.grant(self.collected, priority).await;
         let mut resend_counter = 0;
-        let resend_timeout_millis = rand::thread_rng().gen_range::<u64, Range<u64>>(400..2000);
+        let resend_timeout_millis = rand::thread_rng().gen_range::<u64, Range<u64>>(20..40);
         loop {
             select! {
                 _ = sleep(Duration::from_millis(resend_timeout_millis)) => {
                     if resend_counter == 5 {
-                        println!(
-                            "MESSAGE RECEIVER (ID: {}) (ID: {}) DIED",
-                            self.datagram.destination_id, self.message_id
-                        );
                         self.priority_manager_handle
                             .unregister_scheduled_message(self.message_id)
                             .await;
@@ -164,10 +142,6 @@ impl MessageReceiver {
                         self.expected - self.collected
                     ).await;
                     self.grant(self.collected, priority).await;
-                    println!(
-                        "MESSAGE RECEIVER (ID: {}) (ID: {}) REQUESTED RESEND",
-                        self.datagram.destination_id, self.message_id
-                    );
                     resend_counter += 1;
                 }
                 Some(datagram) = self.rx.recv() => {
@@ -177,10 +151,6 @@ impl MessageReceiver {
                                     datagram.workload.clone(),
                                 )
                                 .await;
-                    println!(
-                        "MESSAGE RECEIVER (ID: {}) (ID: {}) RECEIVED SCHEDULED DATAGRAM FROM (ID: {})",
-                        datagram.destination_id, datagram.message_id, datagram.source_id
-                    );
                     self.add_datagram(datagram);
                     if let Complete =  self.check_message_scheduled() {
                         self.priority_manager_handle
@@ -228,13 +198,11 @@ impl MessageReceiver {
         grant.sequence_number = sequence_number;
         grant.priority = priority;
         grant.workload = self.workload.clone();
-        println!("@@@ {:?}", grant);
         let grant_ip = grant.to_ipv4(56);
         self.datagram_sender_handle
             .send(grant_ip)
             .await
             .expect("MessageReceiver -> DatagramSender failed");
-        println!("MESSAGE RECEIVER SENT GRANT");
     }
 
     async fn complete(&mut self) {
@@ -280,35 +248,15 @@ async fn run_message_receiver(mut message_receiver: MessageReceiver) {
         .await
         .expect("MessageReceiver -> WorkloadManager failed");
     if let UnscheduledState::Incomplete = message_receiver.receive_unscheduled_datagrams().await {
-        println!(
-            "MESSAGE RECEIVER (ID: {}) (ID: {}) FAILED TO RECEIVE ALL UNSCHEDULED DATAGRAMS",
-            message_receiver.destination_id, message_receiver.message_id,
-        );
         return;
     }
-    println!(
-        "MESSAGE RECEIVER (ID: {}) (ID: {}) RECEIVED ALL UNSCHEDULED DATAGRAMS",
-        message_receiver.destination_id, message_receiver.message_id,
-    );
     if message_receiver.unscheduled_only {
-        println!(
-            "MESSAGE RECEIVER (ID: {}) (ID: {}) RECEIVED ALL DATAGRAMS",
-            message_receiver.destination_id, message_receiver.message_id,
-        );
         message_receiver.complete().await;
         return;
     }
     if let ScheduledState::Incomplete = message_receiver.receive_scheduled_datagrams().await {
-        println!(
-            "MESSAGE RECEIVER (ID: {}) (ID: {}) FAILED TO RECEIVE ALL SCHEDULED DATAGRAMS",
-            message_receiver.destination_id, message_receiver.message_id,
-        );
         return;
     }
-    println!(
-        "MESSAGE RECEIVER (ID: {}) (ID: {}) RECEIVED ALL SCHEDULED DATAGRAMS",
-        message_receiver.destination_id, message_receiver.message_id,
-    );
     message_receiver.complete().await;
 }
 

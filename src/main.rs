@@ -49,7 +49,7 @@ async fn start_homa() -> Result<(), io::Error> {
     loop {}
 }
 
-#[tokio::main]
+#[tokio::main(worker_threads = 60)]
 async fn main() {
     start_homa().await.unwrap();
 }

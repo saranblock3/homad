@@ -17,48 +17,44 @@ pub struct DatagramReceiver {
 
 impl DatagramReceiver {
     fn handle_packet_payload(&self, packet_bytes: &[u8]) {
-        use super::application::ApplicationMessage::FromDatagramReceiver;
         use crate::models::datagram::HomaDatagramType::*;
-        println!("DATAGRAM RECEIVER === {:?}", packet_bytes[17..21].to_vec());
         if let Ok(datagram) = deserialize::<HomaDatagram>(&packet_bytes) {
-            println!(
-                "DATAGRAM RECEIVER RECEIVED DATAGRAM FROM (ID: {}) TO (ID: {}) WITH MESSAGE ID (ID: {})",
-                datagram.source_id, datagram.destination_id, datagram.message_id
-            );
-            let applications = self.applications.lock().unwrap();
-            if let Some(application_handle) = applications.get(&datagram.destination_id) {
-                match datagram.datagram_type {
-                    Data => {
-                        if let Some((message_receiver_handle, _)) = application_handle
-                            .message_receivers
-                            .blocking_lock()
-                            .get(&datagram.message_id)
-                        {
-                            // println!(
-                            //     "DATAGRAM RECEIVER RECEIVED DATA DATAGRAM FROM (ID: {}) TO (ID: {}) WITH MESSAGE ID (ID: {}) DISPATCH TO MESSAGE RECEIVER",
-                            //     datagram.source_id, datagram.destination_id, datagram.message_id
-                            // );
-                            let _ = message_receiver_handle.tx.blocking_send(datagram);
-                        } else {
-                            // println!(
-                            //     "DATAGRAM RECEIVER RECEIVED DATA DATAGRAM FROM (ID: {}) TO (ID: {}) WITH MESSAGE ID (ID: {}) DISPATCH TO APPLICATION",
-                            //     datagram.source_id, datagram.destination_id, datagram.message_id
-                            // );
-                            let _ =
-                                application_handle.blocking_send(FromDatagramReceiver(datagram));
-                        }
-                    }
-                    _ => {
-                        if let Some((message_sender_handle, _)) = application_handle
-                            .message_senders
-                            .blocking_lock()
-                            .get(&datagram.message_id)
-                        {
-                            let _ = message_sender_handle.tx.blocking_send(datagram);
-                        }
-                        // println!("DATAGRAM RECEIVER FAILED TO SEND");
-                    }
+            match datagram.datagram_type {
+                Data => {
+                    self.handle_data_datagram(datagram);
                 }
+                _ => {
+                    self.handle_control_datagram(datagram);
+                }
+            }
+        }
+    }
+
+    pub fn handle_data_datagram(&self, datagram: HomaDatagram) {
+        use super::application::ApplicationMessage::FromDatagramReceiver;
+        let applications = self.applications.lock().unwrap();
+        if let Some(application_handle) = applications.get(&datagram.destination_id) {
+            if let Some((message_receiver_handle, _)) = application_handle
+                .message_receivers
+                .blocking_lock()
+                .get(&datagram.message_id)
+            {
+                let _ = message_receiver_handle.tx.blocking_send(datagram);
+                return;
+            }
+            let _ = application_handle.blocking_send(FromDatagramReceiver(datagram));
+        }
+    }
+
+    pub fn handle_control_datagram(&self, datagram: HomaDatagram) {
+        let applications = self.applications.lock().unwrap();
+        if let Some(application_handle) = applications.get(&datagram.destination_id) {
+            if let Some((message_sender_handle, _)) = application_handle
+                .message_senders
+                .blocking_lock()
+                .get(&datagram.message_id)
+            {
+                let _ = message_sender_handle.tx.blocking_send(datagram);
             }
         }
     }

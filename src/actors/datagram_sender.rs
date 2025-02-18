@@ -17,17 +17,12 @@ impl DatagramSender {
     fn handle_packet_bytes(&mut self, packet_bytes: Vec<u8>) {
         let packet = Ipv4Packet::new(&packet_bytes).unwrap();
         let address = packet.get_destination();
-        if let Err(_) = self.transport_sender.send_to(packet, IpAddr::V4(address)) {
-            let test: [u8; 8] = packet_bytes[20 + 1..20 + 9].try_into().unwrap();
-            println!("DATAGRAM SENDER ERROR === {:?}", u64::from_ne_bytes(test));
-        }
+        let _ = self.transport_sender.send_to(packet, IpAddr::V4(address));
     }
 }
 
 fn run_datagram_sender(mut datagram_sender: DatagramSender) {
     while let Some(packet_bytes) = datagram_sender.rx.blocking_recv() {
-        let test: [u8; 8] = packet_bytes[20 + 1..20 + 9].try_into().unwrap();
-        println!("DATAGRAM SENDER === {:?}", u64::from_ne_bytes(test));
         datagram_sender.handle_packet_bytes(packet_bytes);
     }
 }
@@ -49,7 +44,7 @@ impl DatagramSenderHandle {
     }
 
     pub async fn send(&self, packet: Vec<u8>) -> Result<(), SendError<Vec<u8>>> {
-        let timeout = rand::thread_rng().gen_range::<u64, Range<u64>>(0..5000);
+        let timeout = rand::thread_rng().gen_range::<u64, Range<u64>>(0..200);
         sleep(Duration::from_micros(timeout)).await;
         self.tx.send(packet).await
     }

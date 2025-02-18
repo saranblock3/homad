@@ -28,10 +28,6 @@ async fn run_application_reader(application_reader: ApplicationReader) {
     let mut stream = net::UnixStream::from(application_reader.stream.try_clone().unwrap());
     while let Ok(message_option) = HomaMessage::from_unix_stream(&mut stream).await {
         if let Some(message) = message_option {
-            println!(
-                "APPLICATION READER (ID: {}) (ID: {}) READ MESSAGE",
-                message.source_id, message.id
-            );
             application_reader
                 .application_handle
                 .send(FromApplicationReader(message))

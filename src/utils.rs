@@ -1,10 +1,5 @@
-use std::{
-    collections::VecDeque,
-    ops::{Add, Div, Rem},
-    usize,
-};
+use std::{collections::HashSet, hash::Hash};
 
-use num::{Float, Integer, Num};
 use sscanf::scanf;
 
 #[allow(unused)]
@@ -74,6 +69,38 @@ pub fn quantile(v: &Vec<u64>, q: f32) -> u64 {
 
     let i = quotient as usize;
     return v[i];
+}
+
+pub struct Cache<T> {
+    num_levels: usize,
+    levels: Vec<HashSet<T>>,
+    primary: usize,
+}
+
+impl<T: Eq + Hash> Cache<T> {
+    fn new(num_levels: usize) -> Self {
+        let mut levels = Vec::with_capacity(num_levels);
+        for i in 0..num_levels {
+            levels.push(HashSet::new());
+        }
+        Self {
+            num_levels,
+            levels,
+            primary: 0,
+        }
+    }
+
+    fn increment_level(&mut self) {
+        self.primary = (self.primary + 1) % self.num_levels;
+    }
+
+    fn clear(&mut self) {
+        self.levels[self.primary].clear();
+    }
+
+    fn insert(&mut self, element: T) {
+        self.levels[self.primary].insert(element);
+    }
 }
 
 #[cfg(test)]

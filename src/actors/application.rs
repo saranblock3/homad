@@ -1,5 +1,5 @@
 use super::priority_manager::PriorityManagerHandle;
-use super::workload_manager::{self, WorkloadManagerHandle};
+use super::workload_manager::WorkloadManagerHandle;
 use super::{
     application_writer::ApplicationWriterHandle, datagram_sender::DatagramSenderHandle,
     message_receiver::MessageReceiverHandle, message_sender::MessageSenderHandle,
@@ -9,11 +9,13 @@ use crate::actors::application_registrar::ApplicationRegistrarMessage::FromAppli
 use crate::models::{datagram::HomaDatagram, message::HomaMessage};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
+use tokio::select;
 use tokio::sync::mpsc::error::SendError;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
+use tokio::time::sleep;
 
 #[allow(unused)]
 struct Application {
@@ -44,7 +46,6 @@ impl Application {
     }
 
     async fn handle_shutdown(&mut self) {
-        println!("APPLICATION (ID: {}) SHUTDOWN", self.id);
         self.application_registrar_handle
             .send(FromApplication(self.id))
             .await;
@@ -53,10 +54,6 @@ impl Application {
 
     async fn handle_from_datagram_receiver(&mut self, datagram: HomaDatagram) {
         use crate::models::datagram::HomaDatagramType::*;
-        println!(
-            "APPLICATION (ID: {}) RECEIVED DATAGRAM FROM (ID: {}) WITH MESSAGE ID {}",
-            self.id, datagram.source_id, datagram.message_id,
-        );
         match datagram.datagram_type {
             Data => self.handle_data_datagram(datagram).await,
             _ => self.handle_control_datagram(datagram).await,
@@ -65,7 +62,7 @@ impl Application {
 
     async fn handle_data_datagram(&mut self, datagram: HomaDatagram) {
         let message_id = datagram.message_id;
-        if self.delivered_messages.contains(&datagram.message_id) {
+        if self.delivered_messages.contains(&message_id) {
             return;
         }
         let mut message_receivers = self.message_receivers.lock().await;
@@ -73,10 +70,6 @@ impl Application {
             message_receiver_handle.tx.send(datagram).await;
             return;
         }
-        println!(
-            "APPLICATION (ID: {}) CREATE MESSAGE RECEIVER (ID: {}) FROM (ID: {})",
-            self.id, datagram.message_id, datagram.source_id
-        );
         let message_receiver_handle = MessageReceiverHandle::new(
             datagram,
             self.datagram_sender_handle.clone(),
@@ -105,12 +98,11 @@ impl Application {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap();
         println!(
-            "APPLICATION (ID: {}) CREATE MESSAGE SENDER (ID: {}) AT TIME: {}",
-            self.id,
+            "(ID: {}) SENT AT TIME - {} WITH SIZE {}",
             message.id,
-            now.as_millis()
+            now.as_millis(),
+            message.content.len()
         );
-        println!("(ID: {}) SENT AT TIME - {}", message.id, now.as_millis());
         let message_sender_handle = MessageSenderHandle::new(
             message,
             self.application_handle.clone(),
@@ -122,12 +114,6 @@ impl Application {
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap();
-        println!(
-            "APPLICATION (ID: {}) CREATED MESSAGE SENDER (ID: {}) AT TIME: {}",
-            self.id,
-            message_id,
-            now.as_millis()
-        );
     }
 
     async fn handle_from_message_receiver(&mut self, message: HomaMessage) {
@@ -136,26 +122,20 @@ impl Application {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap();
         println!(
-            "APPLICATION (ID: {}) DELIVERED MESSAGE (ID: {}) AT TIME: {}",
-            self.id,
+            "(ID: {}) DELIVERED AT TIME - {} WITH SIZE {}",
             message.id,
-            now.as_millis()
-        );
-        println!(
-            "(ID: {}) DELIVERED AT TIME - {}",
-            message.id,
-            now.as_millis()
+            now.as_millis(),
+            message.content.len()
         );
         if let Some((message_receiver_handle, join_handle)) =
             self.message_receivers.lock().await.remove(&message.id)
         {
-            join_handle.abort();
             self.application_writer_handle.tx.send(message).await;
+            join_handle.abort();
         }
     }
 
     async fn handle_from_message_sender(&mut self, id: u64) {
-        println!("MESSAGE SENDER (ID: {}) (ID: {}) FINISHED", self.id, id);
         if let Some((message_receiver_handle, join_handle)) =
             self.message_senders.lock().await.remove(&id)
         {
@@ -176,17 +156,9 @@ pub enum ApplicationMessage {
 
 async fn run_application(mut application: Application) {
     while let Some(application_message) = application.rx.recv().await {
-        println!(
-            "APPLICATION (ID: {}): {:?}",
-            application.id, application_message
-        );
         application
             .handle_application_message(application_message)
             .await;
-        println!(
-            "APPLICATION (ID: {}) HANDLED APPLICATION MESSAGE",
-            application.id
-        );
     }
 }
 

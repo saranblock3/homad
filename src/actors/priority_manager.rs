@@ -196,7 +196,6 @@ impl PriorityManager {
                 self.handle_put_priority_level_partions(address, priority_level_partitions);
             }
         };
-        println!("PRIORITY MANAGER: {:?}", self.scheduled_priority_levels);
     }
 }
 

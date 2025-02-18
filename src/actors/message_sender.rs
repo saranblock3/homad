@@ -37,10 +37,6 @@ impl MessageSender {
         if let Some(data) = self.datagrams.get(grant.sequence_number as usize) {
             data.to_owned().workload = self.workload.clone();
             let packet = data.to_ipv4(grant.priority);
-            println!(
-                "MESSAGE SENDER (ID: {}) (ID: {}) RECEIVED GRANT FROM (ID: {})",
-                grant.destination_id, grant.message_id, grant.source_id
-            );
             self.datagram_sender_handle
                 .send(packet)
                 .await
@@ -84,13 +80,10 @@ impl MessageSender {
     async fn send_unscheduled_datagrams(&mut self) -> Option<HomaDatagram> {
         self.send_datagram_slice(0, UNSCHEDULED_HOMA_DATAGRAM_LIMIT)
             .await;
-        println!(
-            "MESSAGE SENDER (ID: {}) (ID: {}) SENT UNSCHEDULED DATAGRAMS TO (ID: {})",
-            self.message.source_id, self.message.id, self.message.destination_id
-        );
         let mut resend_counter = 0;
         loop {
-            let resend_timeout_millis = rand::thread_rng().gen_range::<u64, Range<u64>>(500..2000);
+            // let resend_timeout_millis = rand::thread_rng().gen_range::<u64, Range<u64>>(500..2000);
+            let resend_timeout_millis = rand::thread_rng().gen_range::<u64, Range<u64>>(20..40);
             select! {
                 _ = sleep(Duration::from_millis(resend_timeout_millis)) => {
                     if resend_counter == 5 {
@@ -98,10 +91,6 @@ impl MessageSender {
                     }
                     self.send_datagram_slice(0, UNSCHEDULED_HOMA_DATAGRAM_LIMIT)
                         .await;
-                    println!(
-                        "MESSAGE SENDER (ID: {}) (ID: {}) SENT UNSCHEDULED DATAGRAMS (ID: {})",
-                        self.message.source_id, self.message.id, self.message.destination_id
-                    );
                     resend_counter += 1;
                 }
                 Some(datagram) = self.rx.recv() => {
@@ -122,9 +111,6 @@ impl MessageSender {
         loop {
             select! {
                 _ = sleep(Duration::from_millis(10000)) => {
-                    println!(
-                        "DIED SCHEDULED {}", self.message.source_id
-                    );
                     return;
                 }
                 Some(datagram) = self.rx.recv() => {
@@ -137,10 +123,6 @@ impl MessageSender {
                     if self.check_message(&datagram) {
                         return
                     }
-                    println!(
-                        "MESSAGE SENDER (ID: {}) (ID: {}) SENT SCHEDULED DATAGRAM {} (ID: {})",
-                        self.message.source_id, self.message.id, datagram.sequence_number, self.message.destination_id
-                    );
                     self.handle_datagram(datagram).await;
                 }
             }
