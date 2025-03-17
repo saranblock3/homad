@@ -1,5 +1,6 @@
 use bincode::deserialize;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 use std::io::Read;
 use std::os::unix::net::UnixStream;
 
@@ -9,11 +10,14 @@ pub struct HomaRegistrationMessage {
 }
 
 impl HomaRegistrationMessage {
-    pub fn from_unix_stream(stream: &mut UnixStream) -> Result<Self, bincode::Error> {
+    pub fn from_unix_stream(stream: &mut UnixStream) -> Result<Self, String> {
         let mut buffer = [0u8; 4];
 
-        stream.read_exact(&mut buffer)?;
+        stream
+            .read_exact(&mut buffer)
+            .map_err(|_| "HomaRegisrationMessage not read")?;
+        println!("registration size {:?}", buffer);
 
-        deserialize(&buffer)
+        deserialize(&buffer).map_err(|_| "HomaRegistrationMessage not deserialized".to_string())
     }
 }

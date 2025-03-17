@@ -1,18 +1,13 @@
+use crate::config::CONFIG;
+use crate::config::CONST;
 use priority_queue::PriorityQueue;
-use std::{
-    cmp::{Ordering, Reverse},
-    collections::HashMap,
-};
-use tokio::sync::{
-    mpsc::{self},
-    oneshot::{self, channel},
-};
-
-use crate::constants::{HOMA_DATAGRAM_PAYLOAD_LENGTH, UNSCHEDULED_HOMA_DATAGRAM_LIMIT};
-
-const SCHEDULED_PRIORITY_LEVELS: usize = 6;
-const PRIORITY_LEVEL_WIDTH: usize = 8;
-const UNSCHEDULED_PRIORITY_LEVELS: usize = 6;
+use std::cmp::Ordering;
+use std::cmp::Reverse;
+use std::collections::HashMap;
+use std::net::Ipv4Addr;
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
+use tokio::sync::oneshot::channel;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PriorityLevelEntry {
@@ -41,8 +36,9 @@ struct PriorityManager {
     rx: mpsc::Receiver<PriorityManagerMessage>,
     queue: PriorityQueue<(u64, u64), Reverse<u64>>,
     senders: HashMap<u64, oneshot::Sender<()>>,
-    scheduled_priority_levels: [PriorityLevelEntry; SCHEDULED_PRIORITY_LEVELS],
-    unscheduled_priority_levels: HashMap<[u8; 4], Vec<u64>>,
+    scheduled_priority_levels: [PriorityLevelEntry; CONST::SCHEDULED_PRIORITY_LEVELS],
+    unscheduled_priority_partitions:
+        HashMap<Ipv4Addr, [u64; CONST::UNSCHEDULED_PRIORITY_PARTITIONS]>,
 }
 
 impl PriorityManager {
@@ -84,7 +80,7 @@ impl PriorityManager {
             self.sort_priority_levels();
         }
         if let Some(position) = self.find_message_position(id) {
-            return Some(position as u8 * PRIORITY_LEVEL_WIDTH as u8);
+            return Some(position as u8 * CONST::PRIORITY_LEVEL_WIDTH as u8);
         }
         None
     }
@@ -95,6 +91,7 @@ impl PriorityManager {
         remaining_datagrams: u64,
         tx: oneshot::Sender<()>,
     ) {
+        println!("register priority {}", id);
         self.queue
             .push((id, remaining_datagrams), Reverse(remaining_datagrams));
         self.senders.insert(id, tx);
@@ -107,8 +104,10 @@ impl PriorityManager {
         remaining_datagrams: u64,
         tx: oneshot::Sender<u8>,
     ) {
+        eprintln!("get priority {}", id);
         if let Some(priority) = self.update_message(id, remaining_datagrams) {
-            tx.send(priority).unwrap();
+            eprintln!("priority {}", priority);
+            let _ = tx.send(priority);
         }
     }
 
@@ -125,52 +124,54 @@ impl PriorityManager {
         let empty_positions = self.find_empty_entry_positions();
         for position in empty_positions {
             if let Some((entry, _)) = self.queue.pop() {
-                self.scheduled_priority_levels[position] = Occupied(entry);
-                let tx = self.senders.remove(&entry.0).unwrap();
-                tx.send(()).unwrap();
+                if let Some(tx) = self.senders.remove(&entry.0) {
+                    self.scheduled_priority_levels[position] = Occupied(entry);
+                    let _ = tx.send(());
+                }
             }
         }
+        println!("priority levels {:?}", self.scheduled_priority_levels);
         self.sort_priority_levels();
     }
 
     fn handle_get_unscheduled_priority(
         &self,
-        address: [u8; 4],
+        address: Ipv4Addr,
         message_length: u64,
         tx: oneshot::Sender<u8>,
     ) {
-        match self.unscheduled_priority_levels.get(&address) {
+        match self.unscheduled_priority_partitions.get(&address) {
             Some(priority_level_partitions) => {
                 for (i, partition) in priority_level_partitions.iter().enumerate() {
                     if message_length <= *partition {
-                        tx.send((56 - i * 8) as u8);
+                        let _ = tx.send((56 - i * 8) as u8);
                         return;
                     }
                 }
                 let _ = tx.send((64 - priority_level_partitions.len() * 8) as u8);
             }
-            None => {
+            _ => {
                 let rtt_bytes =
-                    UNSCHEDULED_HOMA_DATAGRAM_LIMIT * HOMA_DATAGRAM_PAYLOAD_LENGTH as usize;
-                let priority_level_width = rtt_bytes / UNSCHEDULED_PRIORITY_LEVELS;
-                for i in 1..UNSCHEDULED_PRIORITY_LEVELS {
+                    CONFIG.UNSCHEDULED_DATAGRAM_LIMIT * CONFIG.DATAGRAM_PAYLOAD_LENGTH as usize;
+                let priority_level_width = rtt_bytes / CONST::UNSCHEDULED_PRIORITY_LEVELS;
+                for i in 1..CONST::UNSCHEDULED_PRIORITY_LEVELS {
                     let partition = (i * priority_level_width) as u64;
                     if message_length <= partition {
                         let _ = tx.send((64 - i * 8) as u8);
                         return;
                     }
                 }
-                let _ = tx.send((64 - UNSCHEDULED_PRIORITY_LEVELS * 8) as u8);
+                let _ = tx.send((64 - CONST::UNSCHEDULED_PRIORITY_LEVELS * 8) as u8);
             }
         }
     }
 
     fn handle_put_priority_level_partions(
         &mut self,
-        address: [u8; 4],
-        priority_level_partitions: Vec<u64>,
+        address: Ipv4Addr,
+        priority_level_partitions: [u64; CONST::UNSCHEDULED_PRIORITY_PARTITIONS],
     ) {
-        self.unscheduled_priority_levels
+        self.unscheduled_priority_partitions
             .insert(address, priority_level_partitions);
     }
 
@@ -180,19 +181,19 @@ impl PriorityManager {
     ) {
         use PriorityManagerMessage::*;
         match priority_manager_message {
-            RegisterScheduledMessage((id, remaining_datagrams, tx)) => {
+            RegisterScheduledMessage(id, remaining_datagrams, tx) => {
                 self.handle_register_scheduled_message(id, remaining_datagrams, tx);
             }
-            GetScheduledPriority((id, remaining_datagrams, tx)) => {
+            GetScheduledPriority(id, remaining_datagrams, tx) => {
                 self.handle_get_scheduled_priority(id, remaining_datagrams, tx);
             }
             UnregisterScheduledMessage(id) => {
                 self.handle_unregister_scheduled_message(id);
             }
-            GetUnscheduledPriority((address, message_length, tx)) => {
+            GetUnscheduledPriority(address, message_length, tx) => {
                 self.handle_get_unscheduled_priority(address, message_length, tx)
             }
-            PutUnscheduledPriorityLevelPartitions((address, priority_level_partitions)) => {
+            PutUnscheduledPriorityLevelPartitions(address, priority_level_partitions) => {
                 self.handle_put_priority_level_partions(address, priority_level_partitions);
             }
         };
@@ -200,11 +201,11 @@ impl PriorityManager {
 }
 
 pub enum PriorityManagerMessage {
-    RegisterScheduledMessage((u64, u64, oneshot::Sender<()>)),
-    GetScheduledPriority((u64, u64, oneshot::Sender<u8>)),
+    RegisterScheduledMessage(u64, u64, oneshot::Sender<()>),
+    GetScheduledPriority(u64, u64, oneshot::Sender<u8>),
     UnregisterScheduledMessage(u64),
-    GetUnscheduledPriority(([u8; 4], u64, oneshot::Sender<u8>)),
-    PutUnscheduledPriorityLevelPartitions(([u8; 4], Vec<u64>)),
+    GetUnscheduledPriority(Ipv4Addr, u64, oneshot::Sender<u8>),
+    PutUnscheduledPriorityLevelPartitions(Ipv4Addr, [u64; CONST::UNSCHEDULED_PRIORITY_PARTITIONS]),
 }
 
 fn run_priority_manager(mut priority_manager: PriorityManager) {
@@ -215,7 +216,7 @@ fn run_priority_manager(mut priority_manager: PriorityManager) {
 
 #[derive(Clone)]
 pub struct PriorityManagerHandle {
-    pub tx: mpsc::Sender<PriorityManagerMessage>,
+    tx: mpsc::Sender<PriorityManagerMessage>,
 }
 
 impl PriorityManagerHandle {
@@ -226,51 +227,52 @@ impl PriorityManagerHandle {
             rx,
             queue: PriorityQueue::new(),
             senders: HashMap::new(),
-            scheduled_priority_levels: [Empty; SCHEDULED_PRIORITY_LEVELS],
-            unscheduled_priority_levels: HashMap::new(),
+            scheduled_priority_levels: [Empty; CONST::SCHEDULED_PRIORITY_LEVELS],
+            unscheduled_priority_partitions: HashMap::new(),
         };
         tokio::task::spawn_blocking(move || run_priority_manager(priority_manager));
         Self { tx }
     }
 
-    pub async fn register_scheduled_message(&self, message_id: u64, remaining_bytes: u64) {
+    pub async fn register_scheduled_message(&self, message_id: u64, remaining_datagrams: u64) {
         use PriorityManagerMessage::*;
         let (tx, rx) = channel::<()>();
-        let priority_manager_message = RegisterScheduledMessage((message_id, remaining_bytes, tx));
-        self.tx.send(priority_manager_message).await.unwrap();
-        rx.await.unwrap();
+        let priority_manager_message =
+            RegisterScheduledMessage(message_id, remaining_datagrams, tx);
+        let _ = self.tx.send(priority_manager_message).await;
+        let _ = rx.await;
     }
 
     pub async fn get_scheduled_priority(&self, message_id: u64, remaining_datagrams: u64) -> u8 {
         use PriorityManagerMessage::*;
         let (tx, rx) = channel::<u8>();
-        let priority_manager_message = GetScheduledPriority((message_id, remaining_datagrams, tx));
-        self.tx.send(priority_manager_message).await.unwrap();
+        let priority_manager_message = GetScheduledPriority(message_id, remaining_datagrams, tx);
+        let _ = self.tx.send(priority_manager_message).await;
         rx.await.unwrap()
     }
 
     pub async fn unregister_scheduled_message(&self, message_id: u64) {
         use PriorityManagerMessage::*;
         let priority_manager_message = UnregisterScheduledMessage(message_id);
-        self.tx.send(priority_manager_message).await.unwrap();
+        let _ = self.tx.send(priority_manager_message).await;
     }
 
-    pub async fn get_unscheduled_priority(&self, address: [u8; 4], message_length: u64) -> u8 {
+    pub async fn get_unscheduled_priority(&self, address: Ipv4Addr, message_length: u64) -> u8 {
         use PriorityManagerMessage::*;
         let (tx, rx) = oneshot::channel();
-        let priority_manager_message = GetUnscheduledPriority((address, message_length, tx));
-        self.tx.send(priority_manager_message).await.unwrap();
+        let priority_manager_message = GetUnscheduledPriority(address, message_length, tx);
+        let _ = self.tx.send(priority_manager_message).await;
         rx.await.unwrap()
     }
 
     pub async fn put_unscheduled_priority_level_partitions(
         &self,
-        address: [u8; 4],
-        priority_level_partitions: Vec<u64>,
+        address: Ipv4Addr,
+        priority_level_partitions: [u64; CONST::UNSCHEDULED_PRIORITY_PARTITIONS],
     ) {
         use PriorityManagerMessage::*;
         let priority_manager_message =
-            PutUnscheduledPriorityLevelPartitions((address, priority_level_partitions));
-        self.tx.send(priority_manager_message).await.unwrap();
+            PutUnscheduledPriorityLevelPartitions(address, priority_level_partitions);
+        let _ = self.tx.send(priority_manager_message).await;
     }
 }
