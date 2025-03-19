@@ -91,7 +91,6 @@ impl PriorityManager {
         remaining_datagrams: u64,
         tx: oneshot::Sender<()>,
     ) {
-        println!("register priority {}", id);
         self.queue
             .push((id, remaining_datagrams), Reverse(remaining_datagrams));
         self.senders.insert(id, tx);
@@ -104,9 +103,7 @@ impl PriorityManager {
         remaining_datagrams: u64,
         tx: oneshot::Sender<u8>,
     ) {
-        eprintln!("get priority {}", id);
         if let Some(priority) = self.update_message(id, remaining_datagrams) {
-            eprintln!("priority {}", priority);
             let _ = tx.send(priority);
         }
     }
@@ -130,7 +127,6 @@ impl PriorityManager {
                 }
             }
         }
-        println!("priority levels {:?}", self.scheduled_priority_levels);
         self.sort_priority_levels();
     }
 

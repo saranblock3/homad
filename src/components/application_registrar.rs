@@ -55,10 +55,7 @@ impl ApplicationRegistrar {
         let id = registration_message.application_id;
 
         match application_handles.get(&id) {
-            Some(_) => {
-                println!("EXISTING APPLICATION");
-                Err("ApplicationRegistrar tried to create existing application".to_string())
-            }
+            Some(_) => Err("ApplicationRegistrar tried to create existing application".to_string()),
             _ => {
                 let (application_handle, join_handle) = ApplicationHandle::new(
                     id,

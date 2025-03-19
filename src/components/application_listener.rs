@@ -26,7 +26,7 @@ impl ApplicationListener {
     fn init() -> Result<UnixListener, String> {
         let _ = fs::remove_file(CONFIG.SOCKET_PATH.clone());
         UnixListener::bind(CONFIG.SOCKET_PATH.clone())
-            .map_err(|_| "ApplicationListener failed to start UnixListener".to_string())
+            .map_err(|e| format!("ApplicationListener failed to start UnixListener: {}", e))
     }
 
     // Spawn the ApplicationListener task as a dedicated thread
@@ -51,7 +51,6 @@ fn run_application_listener(mut application_listener: ApplicationListener) {
                 .blocking_send(FromApplicationListener(stream))
                 .expect("ApplicationListener -> ApplicationRegistrar failed");
         }
-        println!("RESTARTING SOCKET");
         application_listener.listener = ApplicationListener::init()
             .expect("ApplicationListener failed to restart UnixListener");
     }

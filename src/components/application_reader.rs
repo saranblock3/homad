@@ -47,12 +47,10 @@ async fn run_application_reader(application_reader: ApplicationReader) {
                         .await
                         .expect("ApplicationReader -> Application failed");
                 } else {
-                    println!("NO MESSAGE");
                     break;
                 }
             }
-            Err(e) => {
-                println!("{}", e);
+            Err(_) => {
                 break;
             }
         }

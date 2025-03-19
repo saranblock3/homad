@@ -25,7 +25,6 @@ impl ApplicationWriter {
         if let Ok(message_bytes) = serialize(&message) {
             let mut message_payload = (message_bytes.len() as u64).to_le_bytes().to_vec();
             message_payload.append(&mut message_bytes.to_vec());
-            println!("Message payload size: {}", message_payload.len());
             if let Err(_) = self.stream.write_all(&message_payload).await {
                 return None;
             }
@@ -41,7 +40,6 @@ async fn run_application_writer(mut application_writer: ApplicationWriter) {
             break;
         }
     }
-    println!("APPLICATION WRITER CLOSED");
 }
 
 #[derive(Clone)]
