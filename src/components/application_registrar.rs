@@ -37,10 +37,7 @@ impl ApplicationRegistrar {
     fn handle_from_application_listener(&mut self, mut stream: UnixStream) -> Result<(), String> {
         match HomaRegistrationMessage::from_unix_stream(&mut stream) {
             Ok(registration_message) => self.create_application(registration_message, stream),
-            Err(e) => {
-                println!("registration {}", e);
-                Err(e)
-            }
+            Err(e) => Err(e),
         }
     }
 

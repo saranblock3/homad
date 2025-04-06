@@ -1,4 +1,3 @@
-use libc::printf;
 /*
 DatagamSender
 
@@ -14,10 +13,10 @@ use pnet::transport::TransportChannelType::Layer4;
 use pnet::transport::TransportProtocol::Ipv4;
 use pnet::transport::TransportSender;
 use rand::Rng;
+use std::io;
 use std::net::IpAddr;
 use std::ops::Range;
 use std::sync::Arc;
-use std::{io, thread};
 use tokio::sync::Mutex;
 
 #[derive(Clone)]

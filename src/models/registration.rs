@@ -16,7 +16,6 @@ impl HomaRegistrationMessage {
         stream
             .read_exact(&mut buffer)
             .map_err(|_| "HomaRegisrationMessage not read")?;
-        println!("registration size {:?}", buffer);
 
         deserialize(&buffer).map_err(|_| "HomaRegistrationMessage not deserialized".to_string())
     }
