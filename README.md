@@ -4,4 +4,4 @@ This is a daemon for the homa protocol.
 
 ## Installation
 
-Simply download an executable from the release page.
+Executables for Linux and macOS are available on the release page. For Windows, the executable must be built from source.
